@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"fmt"
 )
 
 func main() {
@@ -46,6 +47,20 @@ func main() {
 type raftNode struct {
 	log []*raft.LogEntry
 	// TODO: Implement this!
+
+	//Persistent state on all servers
+	currentTerm int //latest term server has seen (default: 0)
+	votedFor    int //candidateId that received vote in current term (or null if none)
+	id 			int //node id
+	kvMap map[string]string //key-value map
+
+	//Volatile state on all servers
+	commitIndex int //index of highest log entry known to be committed (default: 0)
+	role 		int //0: follower, 1: candidate, 2: leader
+
+	//Volatile state on leaders
+	nextIndex []int //for each server, index of the next log entry to send to that server (default: leader last log index + 1)
+	matchIndex []int //for each server, index of highest log entry known to be replicated on server (default: 0)
 
 }
 
@@ -184,6 +199,9 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 func (rn *raftNode) SetElectionTimeout(ctx context.Context, args *raft.SetElectionTimeoutArgs) (*raft.SetElectionTimeoutReply, error) {
 	// TODO: Implement this!
 	var reply raft.SetElectionTimeoutReply
+	time.Sleep(raft.SetElectionTimeoutArgs.Timeout * time.Millisecond)
+	fmt.Println("Election timeout, start new election")
+	//if after the sleep, the node is still a follower, no AppendEntries, no RPC, then start a new election
 	return &reply, nil
 }
 
@@ -197,6 +215,9 @@ func (rn *raftNode) SetElectionTimeout(ctx context.Context, args *raft.SetElecti
 func (rn *raftNode) SetHeartBeatInterval(ctx context.Context, args *raft.SetHeartBeatIntervalArgs) (*raft.SetHeartBeatIntervalReply, error) {
 	// TODO: Implement this!
 	var reply raft.SetHeartBeatIntervalReply
+	time.Sleep(raft.SetHeartBeatIntervalArgs.Interval * time.Millisecond)
+	fmt.Println("send heartbeat")
+	// send heartbeat to all followers
 	return &reply, nil
 }
 
