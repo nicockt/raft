@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"fmt"
 )
 
 func main() {
@@ -50,7 +49,7 @@ type raftNode struct {
 	// TODO: Implement this!
 
 	id 					int //node id
-	electionTimeOut 	int //election timeout for this node
+	electionTimeout 	int //election timeout for this node
 	heartBeatInterval 	int //heart beat interval for this node
 
 	//Persistent state on all servers
@@ -67,6 +66,11 @@ type raftNode struct {
 	nextIndex 			[]int //for each server, index of the next log entry to send to that server (default: leader last log index + 1)
 	matchIndex 			[]int //for each server, index of highest log entry known to be replicated on server (default: 0)
 
+	electionTicker 		*time.Ticker
+	heartBeatTicker 	*time.Ticker
+
+	resetElectionTicker chan bool
+	resetHeartBeatTicker chan bool
 }
 
 // Desc:
@@ -95,7 +99,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 		log: nil,
 
 		id: nodeId,		
-		electionTimeOut: electionTimeout,
+		electionTimeout: electionTimeout,
 		heartBeatInterval: heartBeatInterval,
 
 		currentTerm: 0, 	// The first leader will increment to 1
@@ -106,6 +110,9 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 		commitIndex: 0,
 		nextIndex: make([]int, 0),
 		matchIndex: make([]int, 0),
+		
+    	resetElectionTicker: make(chan bool),
+		resetHeartBeatTicker: make(chan bool),
 	}
 
 
@@ -122,7 +129,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 	log.Printf("Start listening to port: %d", myport)
 	go s.Serve(l)
 
-	//Try to connect nodes (GRPC)
+	//Try to connect each pair of raft nodes (GRPC)
 	//Can use this nodeifPortMap to send GRPC to other nodes
 	for tmpHostId, hostPorts := range nodeidPortMap {
 		hostId := int32(tmpHostId)
@@ -155,26 +162,59 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// Implement timer with the length of electionTimeOut
 					// if timeout, change to candidate
 					// If receive msg from other nodes, reset the timer
+					// If receive AppendEntries from leader, change to follower
+
+					go func(){
+						rn.electionTicker = time.NewTicker(time.Duration(rn.electionTimeout) * time.Millisecond)
+						defer rn.electionTicker.Stop()
+						for {
+							select {
+							// Timeout, change to candidate
+							case <-rn.electionTicker.C:
+								rn.serverState = raft.Role_Candidate
+								fmt.Println("Change node state to candidate")
+								return
+							// Receive reset signal, reset the timer (i.e. receive msg / setElectionTimeout)
+							case <- rn.resetElectionTicker:
+								rn.electionTicker.Reset(time.Duration(rn.electionTimeout) * time.Millisecond)}
+								fmt.Println("Reset election timeout")
+						}
+
+					}()
+					if(rn.serverState == raft.Role_Candidate){
+						break
+					}					
+					
+
 
 				case raft.Role_Candidate:
-					// Implement timer with the length of electionTimeOut
+					// Send out RequestVote GRPC to all other nodes
+					// Keep track of the votes. If majority, change to leader
 				
 
 				case raft.Role_Leader:
 					// Send out appendEntires GRPC to all followers
-					// 
+					// Send different log entry to different followers according to commitIndex & mathcIndex
+					
+					go func(){
+						rn.heartBeatTicker = time.NewTicker(time.Duration(rn.heartBeatInterval) * time.Millisecond)
+						defer rn.heartBeatTicker.Stop()
+						for {
+							select {
+							// Timeout, send heartbeat
+							case <-rn.heartBeatTicker.C:
+								//AppendEntries heartbeat
+								fmt.Println("Send heartbeat to all followers")
+							// Receive reset signal, reset the timer (i.e. send msg / setHeartBeatInterval)
+							case <- rn.resetHeartBeatTicker:
+								rn.heartBeatTicker.Reset(time.Duration(rn.heartBeatInterval) * time.Millisecond)}
+								fmt.Println("Reset heartBeat timeout")
+						}
+
+					}()	
+			}
 		}
 	}()
-
-
-	//time.Sleep(args.Timeout * time.Millisecond)
-	fmt.Println("Election timeout, start new election")
-	//if after the sleep, the node is still a follower, no AppendEntries, no RPC, then start a new election
-	
-
-	//time.Sleep(args.Interval * time.Millisecond)
-	fmt.Println("send heartbeat")
-	// send heartbeat to all followers
 
 	return &rn, nil
 }
@@ -192,6 +232,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 // Params:
 // args: the operation to propose
 // reply: as specified in Desc
+// Log replication
 func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.ProposeReply, error) {
 	// TODO: Implement this!
 	log.Printf("Receive propose from client")
@@ -210,6 +251,7 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 func (rn *raftNode) GetValue(ctx context.Context, args *raft.GetValueArgs) (*raft.GetValueReply, error) {
 	// TODO: Implement this!
 	var ret raft.GetValueReply
+	//map key to value
 	return &ret, nil
 }
 
@@ -220,6 +262,7 @@ func (rn *raftNode) GetValue(ctx context.Context, args *raft.GetValueArgs) (*raf
 // args: the RequestVote Message, you must include From(src node id) and To(dst node id) when
 // you call this API
 // reply: the RequestVote Reply Message
+// Leader Election
 func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 	// TODO: Implement this!
 	var reply raft.RequestVoteReply
@@ -249,7 +292,9 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 func (rn *raftNode) SetElectionTimeout(ctx context.Context, args *raft.SetElectionTimeoutArgs) (*raft.SetElectionTimeoutReply, error) {
 	// TODO: Implement this!
 	var reply raft.SetElectionTimeoutReply
-	rn.electionTimeOut = args.Timeout
+	fmt.Println("Set election timeout")
+	rn.electionTimeout = int(args.Timeout) // update electionTimeout
+	rn.resetElectionTicker <- true // reset electionTicker
 	return &reply, nil
 }
 
@@ -263,10 +308,9 @@ func (rn *raftNode) SetElectionTimeout(ctx context.Context, args *raft.SetElecti
 func (rn *raftNode) SetHeartBeatInterval(ctx context.Context, args *raft.SetHeartBeatIntervalArgs) (*raft.SetHeartBeatIntervalReply, error) {
 	// TODO: Implement this!
 	var reply raft.SetHeartBeatIntervalReply
-	
-	// reset timer using channel
-	// newRaftNode listen to the channel
-	rn.heartBeatInterval = args.Interval
+	fmt.Println("Set heartBeat interval")
+	rn.heartBeatInterval = int(args.Interval) // update heartBeatInterval
+	rn.resetHeartBeatTicker <- true  // reset heartBeatTicker
 	return &reply, nil
 }
 
