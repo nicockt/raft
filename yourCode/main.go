@@ -199,7 +199,10 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								LastLogIndex: lastLogIndex,  
 								LastLogTerm: lastLogTerm, 
 							})
-							if err != nil && r.VoteGranted == true && r.Term == rn.currentTerm{ 
+							fmt.Println("r.Term: ", r.Term, ", rn.currentTerm: ", rn.currentTerm, "r.VoteGranted: ", r.VoteGranted)
+							
+							if err == nil && r.VoteGranted == true && r.Term <= rn.currentTerm{ 
+								fmt.Println("Vote+1")
 								// Race condition: multiple goroutines may update the voteNum at the same time
 								rn.mu.Lock() // Write lock
 								voteNum++
@@ -217,6 +220,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								rn.serverState = raft.Role_Follower
 								rn.currentTerm = r.Term
 								rn.votedFor = -1
+								rn.currentLeader = -1
 								rn.finishChan <- true
 							}
 						}(hostId, client)
@@ -305,6 +309,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										rn.serverState = raft.Role_Follower
 										rn.currentTerm = r.Term
 										rn.votedFor = -1
+										rn.currentLeader = -1
 										rn.finishChan <- true
 									}
 
