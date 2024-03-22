@@ -199,10 +199,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								LastLogIndex: lastLogIndex,  
 								LastLogTerm: lastLogTerm, 
 							})
-							fmt.Println("r.Term: ", r.Term, ", rn.currentTerm: ", rn.currentTerm, "r.VoteGranted: ", r.VoteGranted)
-							
+
 							if err == nil && r.VoteGranted == true && r.Term <= rn.currentTerm{ 
-								fmt.Println("Vote+1")
 								// Race condition: multiple goroutines may update the voteNum at the same time
 								rn.mu.Lock() // Write lock
 								voteNum++
@@ -249,9 +247,13 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// Send different log entry to different followers according to commitIndex & mathcIndex
 					
 					// Initialize the nextIndex and matchIndex with default values
-					rn.matchIndex = make([]int32, len(hostConnectionMap))
-					rn.nextIndex = make([]int32, len(hostConnectionMap))
-					//TODO: update nextIndex and matchIndex
+					rn.matchIndex = make([]int32, len(hostConnectionMap) + 1)
+					rn.nextIndex = make([]int32, len(hostConnectionMap) + 1)
+					// Update nextIndex and matchIndex
+					for i := range rn.nextIndex{
+						rn.nextIndex[i] = int32(len(rn.log) + 1)
+						rn.matchIndex[i] = 0
+					}
 
 					// Ensure to get into the first case to appendEntries when the node just become leader
 					initial := true
@@ -269,9 +271,12 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 							for hostId, client := range hostConnectionMap{
 
 								// Get prevLogIndex and prevLogTerm
-								prevLogIndex := rn.nextIndex[hostId] - 1
-								prevLogTerm := rn.log[prevLogIndex].Term
-
+								var prevLogIndex int32 = rn.nextIndex[hostId] - 1
+								var prevLogTerm int32 = 0
+								if prevLogIndex > 0{ // If the log is not empty
+									prevLogTerm = rn.log[prevLogIndex].Term
+								}
+								
 								// sendLog depends on the log index of the follower node (host)
 								sendLog := []*raft.LogEntry{}
 								if !initial && int32(len(rn.log)) >= prevLogIndex + 1{
