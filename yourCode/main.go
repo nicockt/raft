@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"sync"
 )
 
 func main() {
@@ -55,10 +56,12 @@ type raftNode struct {
 	//Persistent state on all servers
 	currentTerm 		int32 //latest term server has seen (default: 0)
 	votedFor    		int32 //candidateId that received vote in current term (or null if none)
-	kvMap 				map[string]string //key-value map
+	kvMap 				map[string]int32 //key-value map
 
 	//Volatile state on all servers
 	commitIndex 		int32 //index of highest log entry known to be committed (default: 0)
+	lastLogIndex 		int32 //index of highest log entry known to be logged (default: 0)
+	lastLogTerm 		int32 //term of highest log entry known to be logged (default: 0)
 	currentLeader 		int32 //id of the leader
 	serverState 		raft.Role //0: follower, 1: candidate, 2: leader. role in proto
 
@@ -107,8 +110,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 		serverState: raft.Role_Follower,	// Start as Follower
 		
 		commitIndex: 0,
-		nextIndex: make([]int32, 0),
-		matchIndex: make([]int32, 0),
+		lastLogIndex: 0,
+		lastLogTerm: 0,	
 		
     	resetChan: make(chan bool),
 		finishChan: make(chan bool),
@@ -163,10 +166,9 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// Implement timer with the length of electionTimeOut
 					// if timeout, change to candidate
 					// If receive msg from other nodes, reset the timer
-					// If receive AppendEntries from leader, change to follower
 					
 					select {
-						// Timeout, change to candidate
+						// Set timer to electionTimeout. If timeout, change to candidate
 						case <- time.After(time.Duration(rn.electionTimeout) * time.Millisecond):
 							rn.serverState = raft.Role_Candidate
 							fmt.Println("Change follower state to candidate")
@@ -192,8 +194,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								To: int32(hostId),
 								Term: rn.currentTerm,
 								CandidateId: int32(rn.id),
-								LastLogIndex: int32(0), //TODO: update this
-								LastLogTerm: int32(0), //TODO: update this
+								LastLogIndex: rn.lastLogIndex, //TODO: update this
+								LastLogTerm: rn.lastLogTerm, //TODO: update this
 							})
 							if err != nil && r.VoteGranted == true && r.Term == rn.currentTerm{ 
 								// Race condition: multiple goroutines may update the voteNum at the same time
@@ -236,7 +238,9 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// Replicate Log: Send out appendEntires GRPC to all followers
 					// Send different log entry to different followers according to commitIndex & mathcIndex
 					
-					// Initialize the nextIndex and matchIndex
+					// Initialize the nextIndex and matchIndex with default values
+					rn.matchIndex = make([]int32, len(hostConnectionMap))
+					rn.nextIndex = make([]int32, len(hostConnectionMap))
 
 					// Ensure to get into the first case to appendEntries when the node just become leader
 					initial := true
@@ -278,8 +282,13 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									})
 									if err != nil && r.Success == true {
 										// Update the nextIndex and matchIndex
+										// r.Term == rn.currentTerm
+										//lock
+										//rn.mu.Lock()
 										//rn.nextIndex[hostId] = xxx
 										//rn.matchIndex[hostId] = xxx
+										// 	rn.mu.Unlock()
+										// 	//unlock
 
 										//Count how many nodes have committed the log
 										//If majority committed, considered as committed, commit log in leader
@@ -287,14 +296,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										rn.commitChan <- true
 									}
 
-									// r.Term == rn.currentTerm{
-									// 	//lock
-									// 	rn.mu.Lock()
-									// 	rn.nextIndex[hostId] = int32(len(rn.log) + 1)
-									// 	rn.matchIndex[hostId] = int32(len(rn.log))
-									// 	rn.mu.Unlock()
-									// 	//unlock
-									// }
 								}(hostId, client)
 							}
 						case <- rn.resetChan:
@@ -328,12 +329,12 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 	var ret raft.ProposeReply
 
 	if rn.serverState != raft.Role_Leader{
-		ret.currentLeader = rn.votedFor
+		ret.CurrentLeader = rn.votedFor
 		if args.Op == raft.Operation_Delete{
 			// Check if the key exists
 			// If existed, set ok to true, otherwise false
 			rn.mu.RLock()
-			if val, ok := rn.kvMap[args.key]; ok{
+			if _, ok := rn.kvMap[args.Key]; ok{
 				// Delete the key
 				ret.Status = raft.Status_OK
 			}else{
@@ -347,7 +348,7 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 		}
 	}else{
 		// Proposing to wrong node, not a leader
-		ret.currentLeader = rn.votedFor
+		ret.CurrentLeader = rn.votedFor
 		ret.Status = raft.Status_WrongNode
 	}
 
@@ -444,7 +445,7 @@ func (rn *raftNode) SetElectionTimeout(ctx context.Context, args *raft.SetElecti
 	var reply raft.SetElectionTimeoutReply
 	fmt.Println("Set election timeout")
 	rn.electionTimeout = args.Timeout // update electionTimeout
-	rn.resetChan <- true // reset electionTicker
+	rn.resetChan <- true // reset electionTimeout
 	return &reply, nil
 }
 
@@ -460,7 +461,7 @@ func (rn *raftNode) SetHeartBeatInterval(ctx context.Context, args *raft.SetHear
 	var reply raft.SetHeartBeatIntervalReply
 	fmt.Println("Set heartBeat interval")
 	rn.heartBeatInterval = args.Interval // update heartBeatInterval
-	rn.resetChan <- true  // reset heartBeatTicker
+	rn.resetChan <- true  // reset heartBeatTimeout
 	return &reply, nil
 }
 
