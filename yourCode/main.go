@@ -295,8 +295,10 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										Entries: sendLog,
 										LeaderCommit: leaderCommit,
 									})
-									if err != nil && r.Success == true { // all followers are up to date
+									fmt.Println("AppendEntries done, from:", r.From, " Success:", r.Success, " Term:", r.Term, " Matchedindex:", r.MatchIndex)
+									if err == nil && r.Success == true { // all followers are up to date
 										fmt.Println("AppendEntries success")
+										//Update nextIndex and matchIndex of follower (or do in AppendEntries)
 
 										//Count how many nodes have committed the log
 										//If majority committed, considered as committed, commit log in leader
@@ -316,6 +318,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										rn.votedFor = -1
 										rn.currentLeader = -1
 										rn.finishChan <- true
+									}else if err != nil{
+										//error handling
 									}
 
 								}(hostId, client)
@@ -480,6 +484,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 	reply.From = args.To
 	reply.To = args.From
 	reply.Success = true
+	rn.mu.Lock()
 
 	// Receive heartbeat from new leader
 	if args.Term >= rn.currentTerm{
@@ -489,9 +494,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		
 		if rn.serverState != raft.Role_Follower{ // if receiver is candidate / leader
 			// Change to follower
-			rn.mu.Lock()
 			rn.serverState = raft.Role_Follower
-			rn.mu.Unlock()
 			rn.finishChan <- true
 
 		}else{ // if receiver is follower
@@ -509,9 +512,8 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 	}else if args.PrevLogIndex > 0 && rn.log[args.PrevLogIndex].Term != args.PrevLogTerm{ // last log term != prevLogTerm
 		// bug
 		reply.Success = false
-	}else{
-		//TODO: other cases
 	}
+	//TODO: else if other cases
 
 	// Handle if it is successful
 	if reply.Success{
@@ -535,7 +537,8 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		rn.commitIndex = minIndex
 	}
 
-	
+	rn.mu.Unlock()
+	fmt.Println("AppendEntries done, id:", rn.id)
 	return &reply, nil
 }
 
