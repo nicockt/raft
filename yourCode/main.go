@@ -182,6 +182,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 				case raft.Role_Candidate:
 					rn.currentTerm++
 					rn.votedFor = int32(rn.id)
+					rn.lastLogIndex = int32(len(rn.log))
+					rn.lastLogTerm = rn.log[rn.lastLogIndex].Term
 					voteNum := 0
 
 					// Send out RequestVote GRPC to all other nodes
@@ -194,8 +196,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								To: int32(hostId),
 								Term: rn.currentTerm,
 								CandidateId: int32(rn.id),
-								LastLogIndex: lastLogIndex,  
-								LastLogTerm: lastLogTerm, 
+								LastLogIndex: rn.lastLogIndex,  
+								LastLogTerm: rn.lastLogTerm, 
 							})
 							if err != nil && r.VoteGranted == true && r.Term == rn.currentTerm{ 
 								// Race condition: multiple goroutines may update the voteNum at the same time
@@ -245,6 +247,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// Initialize the nextIndex and matchIndex with default values
 					rn.matchIndex = make([]int32, len(hostConnectionMap))
 					rn.nextIndex = make([]int32, len(hostConnectionMap))
+					//TODO: update nextIndex and matchIndex
 
 					// Ensure to get into the first case to appendEntries when the node just become leader
 					initial := true
@@ -262,12 +265,12 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 							for hostId, client := range hostConnectionMap{
 
 								// Get prevLogIndex and prevLogTerm
-								//prevLogIndex := rn.nextIndex[hostId] - 1
-								//prevLogTerm := xxx
+								prevLogIndex := rn.nextIndex[hostId] - 1
+								prevLogTerm := rn.log[prevLogIndex].Term
 
 								// sendLog depends on the log index of the follower node (host)
 								sendLog := []*raft.LogEntry{}
-								if !initial && int32(len(rn.log) >= prevLogIndex + 1){
+								if !initial && int32(len(rn.log)) >= prevLogIndex + 1{
 									sendLog = rn.log[prevLogIndex:]
 								}
 								leaderCommit := rn.commitIndex
@@ -351,15 +354,12 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 			// If existed, set ok to true, otherwise false
 			rn.mu.RLock()
 			if _, ok := rn.kvMap[args.Key]; ok{
-				// Delete the key
 				ret.Status = raft.Status_OK
 			}else{
 				ret.Status = raft.Status_KeyNotFound
 			}
 			rn.mu.RUnlock()
-		}else{
-			// Put a new key-value pair
-			//Write Lock
+		}else{ // Put a new key-value pair
 			ret.Status = raft.Status_OK
 		}
 	}else{
@@ -369,7 +369,19 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 	}
 
 	if ret.Status == raft.Status_OK || ret.Status == raft.Status_KeyNotFound{
-		
+		rn.log = append(rn.log, &raft.LogEntry{Term: rn.currentTerm, Op: args.Op, Key: args.Key, Value: args.V})
+		// TODO: Update lastLogIndex and lastLogTerm
+		<- rn.commitChan
+
+		// Update kvMap
+		rn.mu.Lock()
+		if args.Op == raft.Operation_Put{
+			rn.kvMap[args.Key] = args.V
+		}else if args.Op == raft.Operation_Delete{
+			delete(rn.kvMap, args.Key)
+		}
+		rn.mu.Unlock()
+		rn.commitIndex++
 	}
 
 	return &ret, nil
@@ -387,8 +399,8 @@ func (rn *raftNode) GetValue(ctx context.Context, args *raft.GetValueArgs) (*raf
 	// TODO: Implement this!
 	var ret raft.GetValueReply
 	//map key to value
-	//Lock
-	rn.mu.RLock()
+	
+	rn.mu.RLock() //Lock
 	if val, ok := rn.kvMap[args.Key]; ok{
 		ret.V = val
 		ret.Status = raft.Status_KeyFound
@@ -396,8 +408,8 @@ func (rn *raftNode) GetValue(ctx context.Context, args *raft.GetValueArgs) (*raf
 		ret.V = 0
 		ret.Status = raft.Status_KeyNotFound
 	}
-	rn.mu.RUnlock()
-	// Unlock
+	rn.mu.RUnlock() // Unlock
+	
 
 	return &ret, nil
 }
@@ -415,13 +427,14 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 	var reply raft.RequestVoteReply
 	reply.From = args.To
 	reply.To = args.From
+	reply.Term = rn.currentTerm	
 
 	// Handle if args.Term > rn.currentTerm
 
 	// If the candidate's term is less than the current term, reject the vote
 	// If the candidate's term is greater than the current term, vote for the candidate
 	
-	if args.Term >= rn.currentTerm && (rn.votedFor == -1 || rn.votedFor == args.CandidateId) && (args.lastLogTerm > rn.lastLogTerm || (args.lastLogTerm == rn.lastLogTerm && args.lastLogIndex >= rn.lastLogIndex))  {
+	if args.Term >= rn.currentTerm && (rn.votedFor == -1 || rn.votedFor == args.CandidateId) && (args.LastLogTerm > rn.lastLogTerm || (args.LastLogTerm == rn.lastLogTerm && args.LastLogIndex >= rn.lastLogIndex))  {
 		rn.mu.Lock() // lock
 		rn.votedFor = args.CandidateId
 		rn.mu.Unlock() // unlock
@@ -430,9 +443,8 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 		reply.VoteGranted = false
 	}
 
-	reply.Term = rn.currentTerm	
 	if reply.VoteGranted == true{
-		// reset the eclection timeout to avoid timeout
+		// reset the follower's election timeout to avoid timeout
 		rn.resetChan <- true
 	}
 	
@@ -450,9 +462,62 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
 	// TODO: Implement this
 	var reply raft.AppendEntriesReply
-	// if host is candidate, change to follower
-	// if host is follower, reset the election timeout
+	reply.From = args.To
+	reply.To = args.From
+	reply.Success = true
 
+	// Receive heartbeat from new leader
+	if args.Term >= rn.currentTerm{
+		rn.votedFor = args.From
+		rn.currentTerm = args.Term
+
+		
+		if rn.serverState != raft.Role_Follower{ // if receiver is candidate / leader
+			// Change to follower
+			rn.mu.Lock()
+			rn.serverState = raft.Role_Follower
+			rn.mu.Unlock()
+			rn.finishChan <- true
+
+		}else{ // if receiver is follower
+			// reset the follower's election timeout to avoid timeout
+			rn.resetChan <- true
+		}
+	}
+
+	reply.Term = rn.currentTerm
+
+	if args.Term < rn.currentTerm{ // leader term < follower term
+		reply.Success = false
+	}else if int32(len(rn.log)) < args.PrevLogIndex{ //last log index < prevLogIndex
+		reply.Success = false
+	}else if rn.log[args.PrevLogIndex].Term != args.PrevLogTerm{ // last log term != prevLogTerm
+		reply.Success = false
+	}else{
+		//TODO: other cases
+	}
+
+	// Handle if it is successful
+	if reply.Success{
+		// 1. Delete the conflict log entries (if not same log, delete from follower)
+		// 2. Append new entries not in the log (append leader log to follower)
+	}
+
+	// Apply when committed
+	if args.LeaderCommit > rn.commitIndex{
+		minIndex := int32(len(rn.log))
+		if args.LeaderCommit < int32(len(rn.log)){
+			minIndex = args.LeaderCommit
+		}
+		for i := rn.commitIndex + 1; i <= minIndex; i++{
+			// Apply the operation to the state machine
+
+
+		}
+		rn.commitIndex = minIndex
+	}
+
+	
 	return &reply, nil
 }
 
