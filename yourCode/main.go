@@ -60,8 +60,6 @@ type raftNode struct {
 
 	//Volatile state on all servers
 	commitIndex 		int32 //index of highest log entry known to be committed (default: 0)
-	lastLogIndex 		int32 //index of highest log entry known to be logged (default: 0)
-	lastLogTerm 		int32 //term of highest log entry known to be logged (default: 0)
 	currentLeader 		int32 //id of the leader
 	serverState 		raft.Role //0: follower, 1: candidate, 2: leader. role in proto
 
@@ -110,8 +108,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 		serverState: raft.Role_Follower,	// Start as Follower
 		
 		commitIndex: 0,  // To be updated when log is committed
-		lastLogIndex: 0, // To be updated when log is appended
-		lastLogTerm: 0,	 // To be updated when log is appended
 		
     	resetChan: make(chan bool),
 		finishChan: make(chan bool),
@@ -171,19 +167,23 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 						// Set timer to electionTimeout. If timeout, change to candidate
 						case <- time.After(time.Duration(rn.electionTimeout) * time.Millisecond):
 							rn.serverState = raft.Role_Candidate
-							fmt.Println("Change follower state to candidate")
+							fmt.Println("Change follower state to candidate, id: ", rn.id)
 						// Receive reset signal, reset the timer (i.e. receive msg / setElectionTimeout)
 						case <- rn.resetChan:
 							// Go back to the begainning of the for loop
-							fmt.Println("Follower reset election timeout")
+							fmt.Println("Follower reset election timeout, id: ", rn.id)
 					}
 
 
 				case raft.Role_Candidate:
 					rn.currentTerm++
 					rn.votedFor = int32(rn.id)
-					rn.lastLogIndex = int32(len(rn.log))
-					rn.lastLogTerm = rn.log[rn.lastLogIndex].Term
+					var lastLogIndex int32 = 0
+					var lastLogTerm int32 = 0
+					if len(rn.log) > 0{
+						lastLogIndex = int32(len(rn.log))
+						lastLogTerm = rn.log[lastLogIndex].Term
+					}
 					voteNum := 0
 
 					// Send out RequestVote GRPC to all other nodes
@@ -196,8 +196,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								To: int32(hostId),
 								Term: rn.currentTerm,
 								CandidateId: int32(rn.id),
-								LastLogIndex: rn.lastLogIndex,  
-								LastLogTerm: rn.lastLogTerm, 
+								LastLogIndex: lastLogIndex,  
+								LastLogTerm: lastLogTerm, 
 							})
 							if err != nil && r.VoteGranted == true && r.Term == rn.currentTerm{ 
 								// Race condition: multiple goroutines may update the voteNum at the same time
@@ -370,7 +370,6 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 
 	if ret.Status == raft.Status_OK || ret.Status == raft.Status_KeyNotFound{
 		rn.log = append(rn.log, &raft.LogEntry{Term: rn.currentTerm, Op: args.Op, Key: args.Key, Value: args.V})
-		// TODO: Update lastLogIndex and lastLogTerm
 		<- rn.commitChan
 
 		// Update kvMap
@@ -433,8 +432,13 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 
 	// If the candidate's term is less than the current term, reject the vote
 	// If the candidate's term is greater than the current term, vote for the candidate
-	
-	if args.Term >= rn.currentTerm && (rn.votedFor == -1 || rn.votedFor == args.CandidateId) && (args.LastLogTerm > rn.lastLogTerm || (args.LastLogTerm == rn.lastLogTerm && args.LastLogIndex >= rn.lastLogIndex))  {
+	var lastLogIndex int32 = 0
+	var lastLogTerm int32 = 0
+	if len(rn.log) > 0{
+		lastLogIndex = int32(len(rn.log))
+		lastLogTerm = rn.log[lastLogIndex].Term
+	}
+	if args.Term >= rn.currentTerm && (rn.votedFor == -1 || rn.votedFor == args.CandidateId) && (args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex))  {
 		rn.mu.Lock() // lock
 		rn.votedFor = args.CandidateId
 		rn.mu.Unlock() // unlock
