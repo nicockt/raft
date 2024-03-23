@@ -260,11 +260,14 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 
 					select{
 						case <- time.After(time.Duration(interval) * time.Millisecond):
+							//fmt.Println("Leader send heartbeat")
 							
 							if initial { // When the node just become leader
 								initial = false
 								interval = rn.heartBeatInterval
 							}
+
+							commitCount := 0
 
 							// Send out heartbeat to all followers
 							for hostId, client := range hostConnectionMap{
@@ -295,32 +298,46 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										Entries: sendLog,
 										LeaderCommit: leaderCommit,
 									})
-									fmt.Println("AppendEntries done, from:", r.From, " Success:", r.Success, " Term:", r.Term, " Matchedindex:", r.MatchIndex)
 									if err == nil && r.Success == true { // all followers are up to date
-										fmt.Println("AppendEntries success")
+										fmt.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
+										// bug: error after this line
+
 										//Update nextIndex and matchIndex of follower (or do in AppendEntries)
+										//rn.nextIndex[hostId] = r.MatchIndex + 1
+
 
 										//Count how many nodes have committed the log
 										//If majority committed, considered as committed, commit log in leader
 										//If a node committed the log, send a signal to the commitChan
-										commitCount := 0
-										if true{ //TODO: check if the log is committed
-											commitCount++
-										}
+										
+										//TODO: check if the log is committed
+										rn.mu.Lock()
+										commitCount++
+										rn.mu.Unlock()
+										
 										if commitCount >= len(hostConnectionMap)/2{
 											rn.commitIndex = rn.commitIndex + 1
 											rn.commitChan <- true
 										}
 										
-									}else if r.Term > rn.currentTerm{ // other node term > leader term
+									}else if err == nil && r.Success == false && r.Term > rn.currentTerm{ // other node term > leader term
 										rn.serverState = raft.Role_Follower
 										rn.currentTerm = r.Term
 										rn.votedFor = -1
 										rn.currentLeader = -1
 										rn.finishChan <- true
+									}else if err == nil && r.Success == false && r.Term <= rn.currentTerm{
+										// If the follower's log is outdated, decrement the nextIndex, appendEntries again
+										rn.nextIndex[hostId] = rn.nextIndex[hostId] - 1
+
 									}else if err != nil{
 										//error handling
+										fmt.Println("Error in AppendEntries")
 									}
+
+									
+
+									
 
 								}(hostId, client)
 							}
@@ -362,7 +379,7 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 	log.Printf("Receive propose from client")
 	var ret raft.ProposeReply
 
-	if rn.serverState != raft.Role_Leader{
+	if rn.serverState == raft.Role_Leader{
 		ret.CurrentLeader = rn.votedFor
 		if args.Op == raft.Operation_Delete{
 			// Check if the key exists
@@ -377,14 +394,15 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 		}else{ // Put a new key-value pair
 			ret.Status = raft.Status_OK
 		}
-	}else{
-		// Proposing to wrong node, not a leader
+	}else{  // Proposing to wrong node, not a leader
 		ret.CurrentLeader = rn.votedFor
 		ret.Status = raft.Status_WrongNode
 	}
 
 	if ret.Status == raft.Status_OK || ret.Status == raft.Status_KeyNotFound{
 		rn.log = append(rn.log, &raft.LogEntry{Term: rn.currentTerm, Op: args.Op, Key: args.Key, Value: args.V})
+		
+		// Wait until majority of nodes have committed the log
 		<- rn.commitChan
 
 		// Update kvMap
@@ -454,9 +472,7 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 		lastLogTerm = rn.log[lastLogIndex].Term
 	}
 	if args.Term >= rn.currentTerm && (rn.votedFor == -1 || rn.votedFor == args.CandidateId) && (args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex))  {
-		rn.mu.Lock() // lock
 		rn.votedFor = args.CandidateId
-		rn.mu.Unlock() // unlock
 		reply.VoteGranted = true
 	}else{
 		reply.VoteGranted = false
@@ -484,14 +500,12 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 	reply.From = args.To
 	reply.To = args.From
 	reply.Success = true
-	rn.mu.Lock()
 
 	// Receive heartbeat from new leader
 	if args.Term >= rn.currentTerm{
 		rn.votedFor = args.From
+		rn.currentLeader = args.LeaderId
 		rn.currentTerm = args.Term
-
-		
 		if rn.serverState != raft.Role_Follower{ // if receiver is candidate / leader
 			// Change to follower
 			rn.serverState = raft.Role_Follower
@@ -517,28 +531,48 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 
 	// Handle if it is successful
 	if reply.Success{
+		// conflictIndex := Min(int32(len(rn.log)), args.PrevLogIndex + 1)
+		// conflictTerm := rn.log[conflictIndex].Term
+
 		// 1. Delete the conflict log entries (if not same log, delete from follower)
+		var i int32 = 1
+		for i = 1; args.PrevLogIndex + i <= int32(len(rn.log)) && i <= int32(len(args.Entries)); i++{
+			// existing log conflicts with new one
+			if rn.log[args.PrevLogIndex + i].Term != args.Entries[i].Term{
+				rn.log = append(rn.log[:args.PrevLogIndex + i])
+				break
+			}
+		}
+		
 		// 2. Append new entries not in the log (append leader log to follower)
-	
-		// Update follower's the nextIndex and matchIndex
+		for i = 1; i <= int32(len(args.Entries)); i++{
+			rn.log = append(rn.log, args.Entries[i])
+		}
+		reply.MatchIndex = int32(len(rn.log))
+
 	}
 
 	// Apply when committed
 	if args.LeaderCommit > rn.commitIndex{
+		// minIndex = min(follower lastLogIndex, leader CommitIndex)
 		minIndex := int32(len(rn.log))
 		if args.LeaderCommit < int32(len(rn.log)){
 			minIndex = args.LeaderCommit
 		}
 		for i := rn.commitIndex + 1; i <= minIndex; i++{
-			// Apply the operation to the state machine
-
-
+			// Apply the operation to kvMap of the follower
+			rn.mu.Lock()
+			if rn.log[i].Op == raft.Operation_Put{
+				rn.kvMap[rn.log[i].Key] = rn.log[i].Value
+			}else if rn.log[i].Op == raft.Operation_Delete{
+				delete(rn.kvMap, rn.log[i].Key)
+			}
+			rn.mu.Unlock()
 		}
 		rn.commitIndex = minIndex
 	}
-
-	rn.mu.Unlock()
-	fmt.Println("AppendEntries done, id:", rn.id)
+	rn.resetChan <- true
+	//fmt.Println("AppendEntries done, id:", rn.id)
 	return &reply, nil
 }
 
