@@ -539,14 +539,14 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		for i = 1; args.PrevLogIndex + i <= int32(len(rn.log)) && i <= int32(len(args.Entries)); i++{
 			// existing log conflicts with new one
 			if rn.log[args.PrevLogIndex + i].Term != args.Entries[i].Term{
-				rn.log = append(rn.log[:args.PrevLogIndex + i])
+				rn.log = rn.log[:args.PrevLogIndex + i]
 				break
 			}
 		}
 		
 		// 2. Append new entries not in the log (append leader log to follower)
-		for i = 1; i <= int32(len(args.Entries)); i++{
-			rn.log = append(rn.log, args.Entries[i])
+		for _, entry := range args.Entries[i:]{
+			rn.log = append(rn.log, entry)
 		}
 		reply.MatchIndex = int32(len(rn.log))
 
@@ -571,7 +571,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		}
 		rn.commitIndex = minIndex
 	}
-	rn.resetChan <- true
+	
 	//fmt.Println("AppendEntries done, id:", rn.id)
 	return &reply, nil
 }
