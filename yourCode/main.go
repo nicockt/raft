@@ -325,11 +325,12 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										rn.currentTerm = r.Term
 										rn.votedFor = -1
 										rn.currentLeader = -1
+										fmt.Println("Leader change to follower, outdated leader")
 										rn.finishChan <- true
 									}else if err == nil && r.Success == false && r.Term <= rn.currentTerm{
 										// If the follower's log is outdated, decrement the nextIndex, appendEntries again
 										rn.nextIndex[hostId] = rn.nextIndex[hostId] - 1
-
+										fmt.Println("Leader appendEntries again, outdated log")
 									}else if err != nil{
 										//error handling
 										fmt.Println("Error in AppendEntries")
@@ -539,17 +540,23 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		for i = 1; args.PrevLogIndex + i <= int32(len(rn.log)) && i <= int32(len(args.Entries)); i++{
 			// existing log conflicts with new one
 			if rn.log[args.PrevLogIndex + i].Term != args.Entries[i].Term{
-				rn.log = rn.log[:args.PrevLogIndex + i]
+				if rn.log != nil && args.PrevLogIndex + i <= int32(len(rn.log)) {
+					rn.log = rn.log[:args.PrevLogIndex + i]
+				}
 				break
 			}
 		}
 		
 		// 2. Append new entries not in the log (append leader log to follower)
-		for _, entry := range args.Entries[i:]{
-			rn.log = append(rn.log, entry)
+		if args.Entries != nil{
+			for _, entry := range args.Entries{
+				rn.log = append(rn.log, entry)
+			}
 		}
 		reply.MatchIndex = int32(len(rn.log))
 
+	}else{
+		reply.MatchIndex = int32(0)
 	}
 
 	// Apply when committed
@@ -572,7 +579,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		rn.commitIndex = minIndex
 	}
 	
-	//fmt.Println("AppendEntries done, id:", rn.id)
+	//fmt.Println("AppendEntries done, from:", reply.From, "To:", reply.To, " Success:", reply.Success, " Term:", reply.Term, " Matchedindex:", reply.MatchIndex)
 	return &reply, nil
 }
 
