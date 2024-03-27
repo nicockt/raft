@@ -159,8 +159,11 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 	log.Printf("Successfully connect all nodes")
 
 	//TODO: kick off leader election here !
+	
+	// 100 ms timeout for follower communication
+	ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
+
 	// Run concurrent goroutine
-	ctx := context.Background()
 	go func(){
 		//infinite loop to check the state of the node
 		for{
