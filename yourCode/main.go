@@ -64,11 +64,12 @@ type raftNode struct {
 	serverState 		raft.Role //0: follower, 1: candidate, 2: leader. role in proto
 
 	//Volatile state on leaders
-	nextIndex 			[]int32 //for each server, index of the next log entry to send to that server (default: leader last log index + 1)
-	matchIndex 			[]int32 //for each server, index of highest log entry known to be replicated on server (default: 0)
+	nextIndex 			map[int32]int32 //for each server, index of the next log entry to send to that server (default: leader last log index + 1)
+	matchIndex 			map[int32]int32 //for each server, index of highest log entry known to be replicated on server (default: 0)
 
 	resetChan chan bool
 	finishChan chan bool
+	heartbeatChan chan bool
 	commitChan chan bool
 	mu sync.RWMutex
 }
@@ -110,8 +111,14 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 		commitIndex: 0,  // To be updated when log is committed
 		
     	resetChan: make(chan bool),
+		heartbeatChan: make(chan bool),
 		finishChan: make(chan bool),
 		commitChan: make(chan bool),
+		mu: sync.RWMutex{},
+		kvMap: make(map[string]int32),
+
+		nextIndex: nil,
+		matchIndex: nil,
 	}
 
 
@@ -166,9 +173,14 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					select {
 						// Set timer to electionTimeout. If timeout, change to candidate
 						case <- time.After(time.Duration(rn.electionTimeout) * time.Millisecond):
-							rn.serverState = raft.Role_Candidate
-							fmt.Println("Change follower state to candidate, id: ", rn.id)
-						// Receive reset signal, reset the timer (i.e. receive msg / setElectionTimeout)
+							if rn.votedFor == -1{ //hasn't vote for anyone yet
+								rn.serverState = raft.Role_Candidate
+								fmt.Println("Change follower state to candidate, id: ", rn.id)
+							}
+						
+						case <- rn.heartbeatChan:
+							// Reset when received heartbeat from leader
+						
 						case <- rn.resetChan:
 							// Reset electionTimeout, Go back to the begainning of the for loop
 					}
@@ -246,8 +258,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// Send different log entry to different followers according to commitIndex & mathcIndex
 					
 					// Initialize the nextIndex and matchIndex with default values
-					rn.matchIndex = make([]int32, len(hostConnectionMap) + 1)
-					rn.nextIndex = make([]int32, len(hostConnectionMap) + 1)
+					rn.matchIndex = make(map[int32]int32, len(hostConnectionMap) + 1)
+					rn.nextIndex = make(map[int32]int32, len(hostConnectionMap) + 1)
 					// Update nextIndex and matchIndex
 					for i := range rn.nextIndex{
 						rn.nextIndex[i] = int32(len(rn.log) + 1)
@@ -298,8 +310,10 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										Entries: sendLog,
 										LeaderCommit: leaderCommit,
 									})
+									fmt.Println("AppendEntries reply done, from:", r.From, " Success: ", r.Success, " Term:", r.Term, " Matchedindex:", r.MatchIndex)
+										
 									if err == nil && r.Success == true { // all followers are up to date
-										fmt.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
+										//fmt.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
 										// bug: error after this line
 
 										//Update nextIndex and matchIndex of follower (or do in AppendEntries)
@@ -516,7 +530,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 
 		}else{ // if receiver is follower
 			// reset the follower's election timeout to avoid timeout
-			rn.resetChan <- true
+			rn.heartbeatChan <- true
 		}
 	}
 
@@ -581,7 +595,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		rn.commitIndex = minIndex
 	}
 	
-	//fmt.Println("AppendEntries done, from:", reply.From, "To:", reply.To, " Success:", reply.Success, " Term:", reply.Term, " Matchedindex:", reply.MatchIndex)
+	fmt.Println("AppendEntries function done, from:", reply.From, "To:", reply.To, " Success:", reply.Success, " Term:", reply.Term, " Matchedindex:", reply.MatchIndex)
 	return &reply, nil
 }
 
