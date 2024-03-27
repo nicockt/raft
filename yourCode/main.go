@@ -63,9 +63,9 @@ type raftNode struct {
 	currentLeader 		int32 //id of the leader
 	serverState 		raft.Role //0: follower, 1: candidate, 2: leader. role in proto
 
-	//Volatile state on leaders
-	nextIndex 			map[int32]int32 //for each server, index of the next log entry to send to that server (default: leader last log index + 1)
-	matchIndex 			map[int32]int32 //for each server, index of highest log entry known to be replicated on server (default: 0)
+	//Volatile state on leaders, TODO: map[int32]int32 ?
+	nextIndex 			[]int32 //for each server, index of the next log entry to send to that server (default: leader last log index + 1)
+	matchIndex 			[]int32 //for each server, index of highest log entry known to be replicated on server (default: 0)
 
 	resetChan chan bool
 	finishChan chan bool
@@ -258,8 +258,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// Send different log entry to different followers according to commitIndex & mathcIndex
 					
 					// Initialize the nextIndex and matchIndex with default values
-					rn.matchIndex = make(map[int32]int32, len(hostConnectionMap) + 1)
-					rn.nextIndex = make(map[int32]int32, len(hostConnectionMap) + 1)
+					rn.matchIndex = make([]int32, len(hostConnectionMap) + 1)
+					rn.nextIndex = make([]int32, len(hostConnectionMap) + 1)
 					// Update nextIndex and matchIndex
 					for i := range rn.nextIndex{
 						rn.nextIndex[i] = int32(len(rn.log) + 1)
@@ -609,7 +609,6 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 func (rn *raftNode) SetElectionTimeout(ctx context.Context, args *raft.SetElectionTimeoutArgs) (*raft.SetElectionTimeoutReply, error) {
 	// TODO: Implement this!
 	var reply raft.SetElectionTimeoutReply
-	fmt.Println("Set election timeout")
 	rn.electionTimeout = args.Timeout // update electionTimeout
 	rn.resetChan <- true // reset electionTimeout
 	return &reply, nil
@@ -625,7 +624,6 @@ func (rn *raftNode) SetElectionTimeout(ctx context.Context, args *raft.SetElecti
 func (rn *raftNode) SetHeartBeatInterval(ctx context.Context, args *raft.SetHeartBeatIntervalArgs) (*raft.SetHeartBeatIntervalReply, error) {
 	// TODO: Implement this!
 	var reply raft.SetHeartBeatIntervalReply
-	fmt.Println("Set heartBeat interval")
 	rn.heartBeatInterval = args.Interval // update heartBeatInterval
 	rn.resetChan <- true  // reset heartBeatTimeout
 	return &reply, nil
