@@ -480,7 +480,6 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 	var reply raft.RequestVoteReply
 	reply.From = args.To
 	reply.To = args.From
-	reply.Term = rn.currentTerm	
 
 	// Handle if args.Term > rn.currentTerm
 
@@ -491,6 +490,14 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 	if len(rn.log) > 0{
 		lastLogIndex = int32(len(rn.log))
 		lastLogTerm = rn.log[lastLogIndex].Term
+	}
+	if args.Term > rn.currentTerm{
+		rn.votedFor = -1
+		rn.currentTerm = args.Term
+		if rn.serverState != raft.Role_Follower{
+			rn.serverState = raft.Role_Follower
+			rn.resetChan <- true
+		}
 	}
 	if args.Term >= rn.currentTerm && (rn.votedFor == -1 || rn.votedFor == args.CandidateId) && (args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex))  {
 		rn.votedFor = args.CandidateId
@@ -504,6 +511,7 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 		rn.resetChan <- true
 	}
 	
+	reply.Term = rn.currentTerm	
 
 	return &reply, nil
 }
