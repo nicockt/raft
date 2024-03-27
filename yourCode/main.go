@@ -317,23 +317,20 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									})
 	
 									if err == nil && r.Success == true { // all followers are up to date
-										//log.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
+										log.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
 										// bug: error after this line
 
 										//Update nextIndex and matchIndex of follower (or do in AppendEntries)
 										//rn.nextIndex[hostId] = r.MatchIndex + 1
 
+										//TODO: matchIndex[N]
 
 										//Count how many nodes have committed the log
 										//If majority committed, considered as committed, commit log in leader
 										//If a node committed the log, send a signal to the commitChan
-										
-										//TODO: check if the log is committed
 										rn.mu.Lock()
 										commitCount++
 										rn.mu.Unlock()
-										
-										//TODO: matchIndex[N]
 										if commitCount >= len(hostConnectionMap)/2{
 											rn.commitIndex = rn.commitIndex + 1
 											log.Println("Leader commit log")
@@ -355,11 +352,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										//error handling
 										log.Println("Error in AppendEntries")
 									}
-
-									
-
-									
-
 								}(hostId, client)
 							}
 						case <- rn.resetChan:
@@ -531,11 +523,11 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 	reply.Success = true
 
 	// Receive heartbeat from new leader
-	if args.Term >= rn.currentTerm{
+	if args.Term>= rn.currentTerm{
 		rn.votedFor = args.From
 		rn.currentLeader = args.LeaderId
 		rn.currentTerm = args.Term
-		if rn.serverState != raft.Role_Follower{ // if receiver is candidate / leader
+		if rn.serverState != raft.Role_Follower{ // if receiver is candidate / leader & sender leader is newer
 			// Change to follower
 			rn.serverState = raft.Role_Follower
 			rn.finishChan <- true
@@ -548,12 +540,11 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 
 	reply.Term = rn.currentTerm
 
-	if args.Term < rn.currentTerm{ // leader term < follower term
+	if args.Term < rn.currentTerm{ // leader term < node term
 		reply.Success = false
 	}else if int32(len(rn.log)) < args.PrevLogIndex{ //other nodes log longer than leader's log
 		reply.Success = false
 	}else if args.PrevLogIndex > 0 && rn.log[args.PrevLogIndex].Term != args.PrevLogTerm{ // last log term != prevLogTerm
-		// bug
 		reply.Success = false
 	}
 
@@ -565,11 +556,12 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		// 1. Delete the conflict log entries (if not same log, delete from follower)
 		var i int32 = 1
 		for i = 1; args.PrevLogIndex + i <= int32(len(rn.log)) && i <= int32(len(args.Entries)); i++{
+			if args.PrevLogIndex + i >= int32(len(rn.log)) || rn.log == nil{
+				break
+			} 
 			// existing log conflicts with new one
 			if rn.log[args.PrevLogIndex + i].Term != args.Entries[i].Term{
-				if rn.log != nil && args.PrevLogIndex + i <= int32(len(rn.log)) {
-					rn.log = rn.log[:args.PrevLogIndex + i]
-				}
+				rn.log = rn.log[:args.PrevLogIndex + i]
 				break
 			}
 		}
@@ -581,10 +573,10 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 			}
 		}
 		reply.MatchIndex = int32(len(rn.log))
-
 	}else{
 		reply.MatchIndex = int32(0)
 	}
+	//log.Println("AppendEntries update log done, MatchIndex:", reply.MatchIndex)
 
 	// Apply when committed
 	if args.LeaderCommit > rn.commitIndex{
