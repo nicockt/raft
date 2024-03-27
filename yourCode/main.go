@@ -161,7 +161,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 	//TODO: kick off leader election here !
 	
 	// 100 ms timeout for follower communication
-	ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
+	ctx, _ := context.WithTimeout(context.Background(), 100 * time.Millisecond)
+
 
 	// Run concurrent goroutine
 	go func(){
@@ -172,13 +173,13 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// Implement timer with the length of electionTimeOut
 					// if timeout, change to candidate
 					// If receive msg from other nodes, reset the timer
-					
+						
 					select {
 						// Set timer to electionTimeout. If timeout, change to candidate
 						case <- time.After(time.Duration(rn.electionTimeout) * time.Millisecond):
 							if rn.votedFor == -1{ //hasn't vote for anyone yet
 								rn.serverState = raft.Role_Candidate
-								fmt.Println("Change follower state to candidate, id: ", rn.id)
+								log.Println("Change follower state to candidate, id: ", rn.id)
 							}
 						
 						case <- rn.heartbeatChan:
@@ -225,7 +226,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								// The node votes for itself, so half of hostConnectionMap voteNum == len(hostConnectionMap)/2 means majority
 								if voteNum >= len(hostConnectionMap)/2 && rn.serverState == raft.Role_Candidate{
 									rn.serverState = raft.Role_Leader
-									fmt.Println("Change candidate state to leader")
+									log.Println("Change candidate state to leader")
 									rn.finishChan <- true //Leave the Candidate state, Back to the begainning of the outer for loop
 								}
 							}else if r.Term > rn.currentTerm{ // other node term term > candidate term
@@ -243,16 +244,16 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					select {
 						// Candidate election timeout, no one wins election
 						case <- time.After(time.Duration(rn.electionTimeout) * time.Millisecond):
-							fmt.Println("Candidate restart election, no one wins the election")
+							log.Println("Candidate restart election, no one wins the election")
 						
 						// get appendEntries from somebody L else
 						case <- rn.resetChan:
 							// Go back to the begainning of the for loop
-							fmt.Println("Candidate reset election timeout")
+							log.Println("Candidate reset election timeout")
 						
 						// Candidate finished the election (won / oudated)
 						case <- rn.finishChan:
-							fmt.Println("Candidate finished the election")
+							log.Println("Candidate finished the election")
 
 					}
 
@@ -275,7 +276,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 
 					select{
 						case <- time.After(time.Duration(interval) * time.Millisecond):
-							//fmt.Println("Leader send heartbeat")
+							//log.Println("Leader send heartbeat")
 							
 							if initial { // When the node just become leader
 								initial = false
@@ -313,10 +314,12 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										Entries: sendLog,
 										LeaderCommit: leaderCommit,
 									})
-									fmt.Println("AppendEntries reply done, from:", r.From, " Success: ", r.Success, " Term:", r.Term, " Matchedindex:", r.MatchIndex)
+
+									// log.FatalLln, lof.Println
+									log.Println("AppendEntries reply done, from:", r.From, " Success: ", r.Success, " Term:", r.Term, " Matchedindex:", r.MatchIndex)
 										
 									if err == nil && r.Success == true { // all followers are up to date
-										//fmt.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
+										//log.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
 										// bug: error after this line
 
 										//Update nextIndex and matchIndex of follower (or do in AppendEntries)
@@ -335,7 +338,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										//TODO: matchIndex[N]
 										if commitCount >= len(hostConnectionMap)/2{
 											rn.commitIndex = rn.commitIndex + 1
-											fmt.Println("Leader commit log")
+											log.Println("Leader commit log")
 											rn.commitChan <- true
 										}
 										
@@ -344,15 +347,15 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										rn.currentTerm = r.Term
 										rn.votedFor = -1
 										rn.currentLeader = -1
-										fmt.Println("Leader change to follower, outdated leader")
+										log.Println("Leader change to follower, outdated leader")
 										rn.finishChan <- true
 									}else if err == nil && r.Success == false && r.Term <= rn.currentTerm{
 										// If the follower's log is outdated, decrement the nextIndex, appendEntries again
 										rn.nextIndex[hostId] = rn.nextIndex[hostId] - 1
-										fmt.Println("Leader appendEntries again, outdated log")
+										log.Println("Leader appendEntries again, outdated log")
 									}else if err != nil{
 										//error handling
-										fmt.Println("Error in AppendEntries")
+										log.Println("Error in AppendEntries")
 									}
 
 									
@@ -363,13 +366,13 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 							}
 						case <- rn.resetChan:
 							// Go back to the begainning of the for loop
-							fmt.Println("Leader reset heartBeat interval")
+							log.Println("Leader reset heartBeat interval")
 						
 						case <- rn.commitChan:
-							fmt.Println("Leader commit log")
+							log.Println("Leader commit log")
 
 						case <- rn.finishChan:
-							fmt.Println("Leader finished the election, outdated leader")
+							log.Println("Leader finished the election, outdated leader")
 						
 						//TODO: appendEntries reset heartBeatInterval here 
 					}
@@ -598,7 +601,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		rn.commitIndex = minIndex
 	}
 	
-	fmt.Println("AppendEntries function done, from:", reply.From, "To:", reply.To, " Success:", reply.Success, " Term:", reply.Term, " Matchedindex:", reply.MatchIndex)
+	log.Println("AppendEntries function done, from:", reply.From, "To:", reply.To, " Success:", reply.Success, " Term:", reply.Term, " Matchedindex:", reply.MatchIndex)
 	return &reply, nil
 }
 
