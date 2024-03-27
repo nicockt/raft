@@ -315,8 +315,10 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										commitCount++
 										rn.mu.Unlock()
 										
+										//TODO: matchIndex[N]
 										if commitCount >= len(hostConnectionMap)/2{
 											rn.commitIndex = rn.commitIndex + 1
+											fmt.Println("Leader commit log")
 											rn.commitChan <- true
 										}
 										
