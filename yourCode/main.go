@@ -71,7 +71,7 @@ type raftNode struct {
 	finishChan chan bool
 	heartbeatChan chan bool
 	commitChan chan bool
-	mu sync.RWMutex
+	mu sync.Mutex
 }
 
 // Desc:
@@ -114,7 +114,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 		heartbeatChan: make(chan bool),
 		finishChan: make(chan bool),
 		commitChan: make(chan bool),
-		mu: sync.RWMutex{},
+		mu: sync.Mutex{},
 		kvMap: make(map[string]int32),
 
 		nextIndex: nil,
@@ -159,10 +159,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 	log.Printf("Successfully connect all nodes")
 
 	//TODO: kick off leader election here !
-	
-	// 100 ms timeout for follower communication
-	ctx, _ := context.WithTimeout(context.Background(), 100 * time.Millisecond)
-
 
 	// Run concurrent goroutine
 	go func(){
@@ -173,7 +169,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// Implement timer with the length of electionTimeOut
 					// if timeout, change to candidate
 					// If receive msg from other nodes, reset the timer
-						
+
 					select {
 						// Set timer to electionTimeout. If timeout, change to candidate
 						case <- time.After(time.Duration(rn.electionTimeout) * time.Millisecond):
@@ -205,6 +201,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// If sequential execute, client dies may block the whole loop
 					for hostId, client := range hostConnectionMap {
 						go func(hostId int32, client raft.RaftNodeClient){
+							// 100 ms timeout for follower communication
+							ctx, _ := context.WithTimeout(context.Background(), 100 * time.Millisecond)
 							// variable r to receive the result of the RequestVote GRPC
 							r, err:= client.RequestVote(ctx, &raft.RequestVoteArgs{
 								From: int32(rn.id),
@@ -215,7 +213,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								LastLogTerm: lastLogTerm, 
 							})
 
-							if err == nil && r.VoteGranted == true && r.Term <= rn.currentTerm{ 
+							if err == nil && r.VoteGranted == true && r.Term == rn.currentTerm{ 
 								// Race condition: multiple goroutines may update the voteNum at the same time
 								rn.mu.Lock() // Write lock
 								voteNum++
@@ -235,6 +233,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								rn.votedFor = -1
 								rn.currentLeader = -1
 								rn.finishChan <- true
+								log.Println("Candidate change to follower, outdated leader")
 							}
 						}(hostId, client)
 					}
@@ -251,7 +250,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 							// Go back to the begainning of the for loop
 							log.Println("Candidate reset election timeout")
 						
-						// Candidate finished the election (won / oudated)
+						// Candidate finished the election (won / oudated / leader exists)
 						case <- rn.finishChan:
 							log.Println("Candidate finished the election")
 
@@ -303,6 +302,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								leaderCommit := rn.commitIndex
 
 								go func(hostId int32, client raft.RaftNodeClient){
+									// 100 ms timeout for follower communication
+									ctx, _ := context.WithTimeout(context.Background(), 100 * time.Millisecond)
 									// variable r to receive the result of the AppendEntries GRPC
 									r, err := client.AppendEntries(ctx, &raft.AppendEntriesArgs{
 										From: int32(rn.id),
@@ -314,10 +315,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										Entries: sendLog,
 										LeaderCommit: leaderCommit,
 									})
-
-									// log.FatalLln, lof.Println
-									log.Println("AppendEntries reply done, from:", r.From, " Success: ", r.Success, " Term:", r.Term, " Matchedindex:", r.MatchIndex)
-										
+	
 									if err == nil && r.Success == true { // all followers are up to date
 										//log.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
 										// bug: error after this line
@@ -353,7 +351,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										// If the follower's log is outdated, decrement the nextIndex, appendEntries again
 										rn.nextIndex[hostId] = rn.nextIndex[hostId] - 1
 										log.Println("Leader appendEntries again, outdated log")
-									}else if err != nil{
+									}else{
 										//error handling
 										log.Println("Error in AppendEntries")
 									}
@@ -407,13 +405,13 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 		if args.Op == raft.Operation_Delete{
 			// Check if the key exists
 			// If existed, set ok to true, otherwise false
-			rn.mu.RLock()
+			rn.mu.Lock()
 			if _, ok := rn.kvMap[args.Key]; ok{
 				ret.Status = raft.Status_OK
 			}else{
 				ret.Status = raft.Status_KeyNotFound
 			}
-			rn.mu.RUnlock()
+			rn.mu.Unlock()
 		}else{ // Put a new key-value pair
 			ret.Status = raft.Status_OK
 		}
@@ -455,7 +453,7 @@ func (rn *raftNode) GetValue(ctx context.Context, args *raft.GetValueArgs) (*raf
 	var ret raft.GetValueReply
 	//map key to value
 	
-	rn.mu.RLock() //Lock
+	rn.mu.Lock() //Lock
 	if val, ok := rn.kvMap[args.Key]; ok{
 		ret.V = val
 		ret.Status = raft.Status_KeyFound
@@ -463,7 +461,7 @@ func (rn *raftNode) GetValue(ctx context.Context, args *raft.GetValueArgs) (*raf
 		ret.V = 0
 		ret.Status = raft.Status_KeyNotFound
 	}
-	rn.mu.RUnlock() // Unlock
+	rn.mu.Unlock() // Unlock
 	
 
 	return &ret, nil
@@ -550,7 +548,6 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		// bug
 		reply.Success = false
 	}
-	//TODO: else if other cases
 
 	// Handle if it is successful
 	if reply.Success{
@@ -601,7 +598,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		rn.commitIndex = minIndex
 	}
 	
-	log.Println("AppendEntries function done, from:", reply.From, "To:", reply.To, " Success:", reply.Success, " Term:", reply.Term, " Matchedindex:", reply.MatchIndex)
+	//log.Println("AppendEntries function done, from:", reply.From, "To:", reply.To, " Success:", reply.Success, " Term:", reply.Term, " Matchedindex:", reply.MatchIndex)
 	return &reply, nil
 }
 
