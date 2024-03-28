@@ -535,7 +535,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		if rn.serverState != raft.Role_Follower{ // if receiver is candidate / leader & sender leader is newer
 			// Change to follower
 			rn.serverState = raft.Role_Follower
-			rn.finishChan <- true
+			rn.resetChan <- true
 
 		}else{ // if receiver is follower
 			// reset the follower's election timeout to avoid timeout
