@@ -220,6 +220,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								voteNum++
 								rn.mu.Unlock() //unlock
 
+								log.Println("Node ", r.From, " vote for node ", rn.id, " voteNum: ", voteNum, "Needed vote: ", len(hostConnectionMap)/2)
 								// If majority, change to leader
 								// hostConnectionMap is all the other nodes, except itself
 								// The node votes for itself, so half of hostConnectionMap voteNum == len(hostConnectionMap)/2 means majority
@@ -228,7 +229,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									log.Println("Change candidate state to leader")
 									rn.finishChan <- true //Leave the Candidate state, Back to the begainning of the outer for loop
 								}
-							}else if r.Term > rn.currentTerm{ // other node term term > candidate term
+							}else if err == nil && r.Term > rn.currentTerm{ // other node term term > candidate term
 								rn.serverState = raft.Role_Follower
 								rn.currentTerm = r.Term
 								rn.votedFor = -1
@@ -239,7 +240,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 						}(hostId, client)
 					}
 
-					
 					// Keep track of the votes. If majority, change to leader
 					select {
 						// Candidate election timeout, no one wins election
@@ -316,7 +316,12 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										Entries: sendLog,
 										LeaderCommit: leaderCommit,
 									})
-									log.Println("Leader ", rn.id," receive AppendEntries from ", hostId)
+
+									log.Println("Leader ", rn.id," receive AppendEntries from ", r.From)
+									if err != nil{
+										log.Println("Leader ", rn.id," receive AppendEntries error from ", hostId)
+										log.Println(err)
+									}
 									
 									//log.Println("AppendEntries ?")
 									if err == nil && r.Success == true { // all followers are up to date
@@ -473,6 +478,8 @@ func (rn *raftNode) GetValue(ctx context.Context, args *raft.GetValueArgs) (*raf
 // Leader Election
 func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 	// TODO: Implement this!
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
 	var reply raft.RequestVoteReply
 	reply.From = args.To
 	reply.To = args.From
@@ -497,7 +504,7 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 			rn.resetChan <- true
 		}
 	}
-	if args.Term >= rn.currentTerm && (rn.votedFor == -1 || rn.votedFor == args.CandidateId) && (args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex))  {
+	if rn.serverState == raft.Role_Follower && args.Term >= rn.currentTerm && (rn.votedFor == -1 || rn.votedFor == args.CandidateId) && (args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex))  {
 		rn.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	}else{
@@ -510,7 +517,6 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 	}
 	
 	reply.Term = rn.currentTerm	
-
 	return &reply, nil
 }
 //TODO: ensure all nodes success?
