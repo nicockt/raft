@@ -524,11 +524,14 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 	reply.From = args.To
 	reply.To = args.From
 	reply.Success = true
+	reply.MatchIndex = int32(0) // default value
 
 	//log.Println("AppendEntries rn id: ", rn.id, "serverState: ", rn.serverState, "args.Term: ", args.Term, "rn.Term: ", rn.currentTerm, "rn.votedFor: ", rn.votedFor, "rn.currentLeader: ", rn.currentLeader)
 
 	// Receive heartbeat from new leader
-	if args.Term>= rn.currentTerm{
+	if args.Term >= rn.currentTerm{
+		rn.mu.Lock()
+		defer rn.mu.Unlock()
 		rn.votedFor = args.From
 		rn.currentLeader = args.LeaderId
 		rn.currentTerm = args.Term
@@ -545,66 +548,69 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 
 	reply.Term = rn.currentTerm
 
-	if args.Term < rn.currentTerm{ // leader term < node term
+	if args.Term < rn.currentTerm{ 
+		// leader is outdated
 		reply.Success = false
-	}else if int32(len(rn.log)) < args.PrevLogIndex{ //other nodes log longer than leader's log
+	}else if args.PrevLogIndex > 0 && int32(len(rn.log)) < args.PrevLogIndex{ 
+		// receiver node do not have PrevLog, not matching
 		reply.Success = false
-	}else if args.PrevLogIndex > 0 && rn.log[args.PrevLogIndex].Term != args.PrevLogTerm{ // last log term != prevLogTerm
+	}else if args.PrevLogIndex > 0 && rn.log[args.PrevLogIndex].Term != args.PrevLogTerm{ 
+		// receiver node PrevLog Term is not matching
 		reply.Success = false
 	}
 
 	// Handle if it is successful
-	// if reply.Success == true && args.Entries != nil{
-	// 	// conflictIndex := Min(int32(len(rn.log)), args.PrevLogIndex + 1)
-	// 	// conflictTerm := rn.log[conflictIndex].Term
+	if reply.Success == true && args.Entries != nil{
+		// conflictIndex := Min(int32(len(rn.log)), args.PrevLogIndex + 1)
+		// conflictTerm := rn.log[conflictIndex].Term
 
-	// 	// 1. Delete the conflict log entries (if not same log, delete from follower)
-	// 	//if args.PrevLogIndex >= 
+		// 1. Delete the conflict log entries (if not same log, delete from follower)
+		//if args.PrevLogIndex >= 
 
-	// 	var i int32 = 1
-	// 	// Handle if rn logIndex > leader logIndex
-	// 	for i = 1; args.PrevLogIndex + i <= int32(len(rn.log)) && i <= int32(len(args.Entries)); i++{
-	// 		if args.PrevLogIndex + i >= int32(len(rn.log)) || rn.log == nil{
-	// 			break
-	// 		} 
-	// 		// existing log conflicts with new one
-	// 		if rn.log[args.PrevLogIndex + i].Term != args.Entries[i].Term{
-	// 			rn.log = rn.log[:args.PrevLogIndex + i]
-	// 			break
-	// 		}
-	// 	}
+		var i int32 = 1
+		// Handle if rn logIndex > leader logIndex
+		for i = 1; args.PrevLogIndex + i <= int32(len(rn.log)) && i <= int32(len(args.Entries)); i++{
+			if args.PrevLogIndex + i >= int32(len(rn.log)) || rn.log == nil{
+				break
+			} 
+			// existing log conflicts with new one
+			if rn.log[args.PrevLogIndex + i].Term != args.Entries[i].Term{
+				rn.log = rn.log[:args.PrevLogIndex + i]
+				break
+			}
+		}
 		
-	// 	// 2. Append new entries not in the log (append leader log to follower)
-	// 	if args.Entries != nil{
-	// 		for _, entry := range args.Entries{
-	// 			rn.log = append(rn.log, entry)
-	// 		}
-	// 	}
-	// 	reply.MatchIndex = int32(len(rn.log))
-	// }else{
-	// 	reply.MatchIndex = int32(0)
-	// }
-	// //log.Println("AppendEntries update log done, MatchIndex:", reply.MatchIndex)
+		// 2. Append new entries not in the log (append leader log to follower)
+		if args.Entries != nil{
+			for _, entry := range args.Entries{
+				rn.log = append(rn.log, entry)
+			}
+		}
+		reply.MatchIndex = int32(len(rn.log))
+	}else{
+		reply.MatchIndex = args.PrevLogIndex
+	}
+	//log.Println("AppendEntries update log done, MatchIndex:", reply.MatchIndex)
 
-	// // Apply when committed
-	// if args.LeaderCommit > rn.commitIndex{
-	// 	// minIndex = min(follower lastLogIndex, leader CommitIndex)
-	// 	minIndex := int32(len(rn.log))
-	// 	if args.LeaderCommit < int32(len(rn.log)){
-	// 		minIndex = args.LeaderCommit
-	// 	}
-	// 	for i := rn.commitIndex + 1; i <= minIndex; i++{
-	// 		// Apply the operation to kvMap of the follower
-	// 		rn.mu.Lock()
-	// 		if rn.log[i].Op == raft.Operation_Put{
-	// 			rn.kvMap[rn.log[i].Key] = rn.log[i].Value
-	// 		}else if rn.log[i].Op == raft.Operation_Delete{
-	// 			delete(rn.kvMap, rn.log[i].Key)
-	// 		}
-	// 		rn.mu.Unlock()
-	// 	}
-	// 	rn.commitIndex = minIndex
-	// }
+	// Apply when committed
+	if args.LeaderCommit > rn.commitIndex{
+		// minIndex = min(follower lastLogIndex, leader CommitIndex)
+		minIndex := int32(len(rn.log))
+		if args.LeaderCommit < int32(len(rn.log)){
+			minIndex = args.LeaderCommit
+		}
+		for i := rn.commitIndex + 1; i <= minIndex; i++{
+			// Apply the operation to kvMap of the follower
+			//rn.mu.Lock()
+			if rn.log[i].Op == raft.Operation_Put{
+				rn.kvMap[rn.log[i].Key] = rn.log[i].Value
+			}else if rn.log[i].Op == raft.Operation_Delete{
+				delete(rn.kvMap, rn.log[i].Key)
+			}
+			//rn.mu.Unlock()
+		}
+		rn.commitIndex = minIndex
+	}
 	
 	//log.Println("AppendEntries function done, from:", reply.From, "To:", reply.To, " Success:", reply.Success, " Term:", reply.Term, " Matchedindex:", reply.MatchIndex)
 	return &reply, nil
