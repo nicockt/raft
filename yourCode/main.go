@@ -4,14 +4,15 @@ import (
 	"context"
 	"cuhk/asgn/raft"
 	"fmt"
-	"google.golang.org/grpc"
 	"log"
 	"net"
 	"os"
 	"strconv"
 	"strings"
-	"time"
 	"sync"
+	"time"
+
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -188,8 +189,10 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 
 
 				case raft.Role_Candidate:
+					rn.mu.Lock()
 					rn.currentTerm++
 					rn.votedFor = int32(rn.id)
+					rn.mu.Unlock()
 					var lastLogIndex int32 = 0
 					var lastLogTerm int32 = 0
 					if len(rn.log) > 0{
@@ -203,8 +206,10 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					for hostId, client := range hostConnectionMap {
 						go func(hostId int32, client raft.RaftNodeClient){
 							// 100 ms timeout for follower communication
-							ctx, _ := context.WithTimeout(context.Background(), 100 * time.Millisecond)
+							ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
+							defer cancel()
 							// variable r to receive the result of the RequestVote GRPC
+							log.Println("Node ", rn.id, " send RequestVote to ", hostId)
 							r, err:= client.RequestVote(ctx, &raft.RequestVoteArgs{
 								From: int32(rn.id),
 								To: int32(hostId),
@@ -213,8 +218,12 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								LastLogIndex: lastLogIndex,  
 								LastLogTerm: lastLogTerm, 
 							})
+							if err != nil{
+								log.Println("Node ", rn.id, " receive RequestVote error from ", hostId)
+								log.Println("errorm msg: ", err)
+							}
 
-							if err == nil && r.VoteGranted == true && r.Term == rn.currentTerm{ 
+							if err == nil && r.VoteGranted && r.Term == rn.currentTerm{ 
 								// Race condition: multiple goroutines may update the voteNum at the same time
 								rn.mu.Lock() // Write lock
 								voteNum++
@@ -225,16 +234,20 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								// hostConnectionMap is all the other nodes, except itself
 								// The node votes for itself, so half of hostConnectionMap voteNum == len(hostConnectionMap)/2 means majority
 								if voteNum >= len(hostConnectionMap)/2 && rn.serverState == raft.Role_Candidate{
+									rn.mu.Lock()
 									rn.serverState = raft.Role_Leader
 									log.Println("Change candidate state to leader")
 									rn.finishChan <- true //Leave the Candidate state, Back to the begainning of the outer for loop
+									rn.mu.Unlock()
 								}
 							}else if err == nil && r.Term > rn.currentTerm{ // other node term term > candidate term
+								rn.mu.Lock()
 								rn.serverState = raft.Role_Follower
 								rn.currentTerm = r.Term
 								rn.votedFor = -1
 								rn.currentLeader = -1
 								rn.finishChan <- true
+								rn.mu.Unlock()
 								log.Println("Candidate change to follower, outdated leader")
 							}
 						}(hostId, client)
@@ -262,6 +275,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// Send different log entry to different followers according to commitIndex & mathcIndex
 					
 					// Initialize the nextIndex and matchIndex with default values
+					rn.mu.Lock()
 					rn.matchIndex = make([]int32, len(hostConnectionMap) + 1)
 					rn.nextIndex = make([]int32, len(hostConnectionMap) + 1)
 					// Update nextIndex and matchIndex
@@ -269,6 +283,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 						rn.nextIndex[i] = int32(len(rn.log) + 1)
 						rn.matchIndex[i] = 0
 					}
+					rn.mu.Unlock()
 
 					// Ensure to get into the first case to appendEntries when the node just become leader
 					initial := true
@@ -303,7 +318,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 
 								go func(hostId int32, client raft.RaftNodeClient){
 									// 100 ms timeout for follower communication
-									ctx, _ := context.WithTimeout(context.Background(), 100 * time.Millisecond)
+									ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
+									defer cancel()
 									log.Println("Leader ", rn.id," send AppendEntries to ", hostId)
 									// variable r to receive the result of the AppendEntries GRPC
 									r, err := client.AppendEntries(ctx, &raft.AppendEntriesArgs{
@@ -317,14 +333,15 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										LeaderCommit: leaderCommit,
 									})
 
-									log.Println("Leader ", rn.id," receive AppendEntries from ", r.From)
 									if err != nil{
 										log.Println("Leader ", rn.id," receive AppendEntries error from ", hostId)
 										log.Println(err)
+									}else{
+										log.Println("Leader ", rn.id," receive AppendEntries from ", r.From, "Success? ", r.Success)
 									}
 									
 									//log.Println("AppendEntries ?")
-									if err == nil && r.Success == true { // all followers are up to date
+									if err == nil && r.Success { // all followers are up to date
 										log.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
 										// bug: error after this line
 
@@ -346,16 +363,20 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 											rn.commitChan <- true
 										}
 										
-									}else if err == nil && r.Success == false && r.Term > rn.currentTerm{ // other node term > leader term
+									}else if err == nil && !r.Success && r.Term > rn.currentTerm{ // other node term > leader term
+										rn.mu.Lock()
 										rn.serverState = raft.Role_Follower
 										rn.currentTerm = r.Term
 										rn.votedFor = -1
 										rn.currentLeader = -1
 										log.Println("Leader change to follower, outdated leader")
 										rn.finishChan <- true
-									}else if err == nil && r.Success == false && r.Term <= rn.currentTerm{
+										rn.mu.Unlock()
+									}else if err == nil && !r.Success && r.Term <= rn.currentTerm{
 										// If the follower's log is outdated, decrement the nextIndex, appendEntries again
+										rn.mu.Lock()
 										rn.nextIndex[hostId] = rn.nextIndex[hostId] - 1
+										rn.mu.Unlock()
 										log.Println("Leader appendEntries again, outdated log")
 									}else{
 										//error handling
@@ -422,8 +443,9 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 	}
 
 	if ret.Status == raft.Status_OK || ret.Status == raft.Status_KeyNotFound{
+		rn.mu.Lock()
 		rn.log = append(rn.log, &raft.LogEntry{Term: rn.currentTerm, Op: args.Op, Key: args.Key, Value: args.V})
-		
+		rn.mu.Unlock()
 		// Wait until majority of nodes have committed the log
 		<- rn.commitChan
 
@@ -434,8 +456,8 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 		}else if args.Op == raft.Operation_Delete{
 			delete(rn.kvMap, args.Key)
 		}
-		rn.mu.Unlock()
 		rn.commitIndex++
+		rn.mu.Unlock()
 	}
 
 	return &ret, nil
@@ -483,8 +505,7 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 	var reply raft.RequestVoteReply
 	reply.From = args.To
 	reply.To = args.From
-
-	
+	log.Println("node ", args.To, " <- ", args.From, " - RequestVote: Entered Voting Phase")
 
 	// If the candidate's term is less than the current term, reject the vote
 	// If the candidate's term is greater than the current term, vote for the candidate
@@ -504,19 +525,17 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 			rn.resetChan <- true
 		}
 	}
+	reply.Term = rn.currentTerm	
+
 	if rn.serverState == raft.Role_Follower && args.Term >= rn.currentTerm && (rn.votedFor == -1 || rn.votedFor == args.CandidateId) && (args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex))  {
 		rn.votedFor = args.CandidateId
 		reply.VoteGranted = true
+		rn.resetChan <- true
 	}else{
+		log.Println("node ", args.From, " <- ", rn.id, " - RequestVote: vote not granted")
 		reply.VoteGranted = false
 	}
-
-	if reply.VoteGranted == true{
-		// reset the follower's election timeout to avoid timeout
-		rn.resetChan <- true
-	}
 	
-	reply.Term = rn.currentTerm	
 	return &reply, nil
 }
 //TODO: ensure all nodes success?
@@ -529,6 +548,8 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 // reply: the AppendEntries Reply Message
 func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
 	// TODO: Implement this
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
 	var reply raft.AppendEntriesReply
 	reply.From = args.To
 	reply.To = args.From
@@ -594,12 +615,10 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		
 		// 2. Append new entries not in the log (append leader log to follower)
 		if args.Entries != nil{
-			for _, entry := range args.Entries{
-				rn.log = append(rn.log, entry)
-			}
+			rn.log = append(rn.log, args.Entries...)
 		}
 		reply.MatchIndex = int32(len(rn.log))
-	}else if reply.Success == true && args.Entries == nil{
+	}else if reply.Success && args.Entries == nil{
 		// Heartbeat
 		reply.MatchIndex = args.PrevLogIndex
 		//log.Println("node ", rn.id, " - AppendEntries: Entered HeartBeat Phase")
@@ -625,7 +644,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		rn.commitIndex = minIndex
 	}
 	
-	log.Println("node ", rn.id, " - AppendEntries: Done")
+	log.Println("node ", rn.id, " - AppendEntries: Done, success: ", reply.Success, " MatchIndex: ", reply.MatchIndex)
 	return &reply, nil
 }
 
