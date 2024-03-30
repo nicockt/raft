@@ -174,10 +174,9 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					select {
 						// Set timer to electionTimeout. If timeout, change to candidate
 						case <- time.After(time.Duration(rn.electionTimeout) * time.Millisecond):
-							if rn.votedFor == -1{ //hasn't vote for anyone yet
-								rn.serverState = raft.Role_Candidate
-								log.Println("Change follower state to candidate, id: ", rn.id)
-							}
+							log.Println("node ", rn.id, " - timout:", rn.electionTimeout)
+							rn.serverState = raft.Role_Candidate
+							log.Println("Change follower state to candidate, id: ", rn.id)
 						
 						case <- rn.heartbeatChan:
 							//log.Println("node ", rn.id, " - Follower receive heartbeat timeout")
@@ -276,77 +275,80 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 						rn.nextIndex[i] = int32(len(rn.log) + 1)
 						rn.matchIndex[i] = 0
 					}
-
+					initial := true
 					// First heartbeat
-					for hostId, client := range hostConnectionMap{
-						var prevLogIndex int32 = rn.nextIndex[hostId] - 1
-						var prevLogTerm int32 = 0
-						if prevLogIndex > 0{ // If the log is not empty
-							prevLogTerm = rn.log[prevLogIndex].Term
-						}
+					if initial{
+						initial = false
+						for hostId, client := range hostConnectionMap{
+							var prevLogIndex int32 = rn.nextIndex[hostId] - 1
+							var prevLogTerm int32 = 0
+							if prevLogIndex > 0{ // If the log is not empty
+								prevLogTerm = rn.log[prevLogIndex].Term
+							}
 
-						go func(hostId int32, client raft.RaftNodeClient){
-							ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
-							defer cancel()
-							log.Println("Leader ", rn.id," send AppendEntries to ", hostId)
-							r, err := client.AppendEntries(ctx, &raft.AppendEntriesArgs{
-								From: int32(rn.id),
-								To: int32(hostId),
-								Term: rn.currentTerm,
-								LeaderId: int32(rn.id),
-								PrevLogIndex: prevLogIndex,
-								PrevLogTerm: prevLogTerm,
-								Entries: nil,
-								LeaderCommit: rn.commitIndex,
-							})
+							go func(hostId int32, client raft.RaftNodeClient){
+								ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
+								defer cancel()
+								log.Println("Leader ", rn.id," send AppendEntries to ", hostId)
+								r, err := client.AppendEntries(ctx, &raft.AppendEntriesArgs{
+									From: int32(rn.id),
+									To: int32(hostId),
+									Term: rn.currentTerm,
+									LeaderId: int32(rn.id),
+									PrevLogIndex: prevLogIndex,
+									PrevLogTerm: prevLogTerm,
+									Entries: nil,
+									LeaderCommit: rn.commitIndex,
+								})
 
-							rn.mu.Lock()
+								rn.mu.Lock()
 
-							if err == nil && r.Success { // all followers are up to date
-								log.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
+								if err == nil && r.Success { // all followers are up to date
+									log.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
 
-								// Update nextIndex and matchIndex
-								if r.MatchIndex > rn.matchIndex[hostId]{
-									rn.matchIndex[hostId] = r.MatchIndex
-									rn.nextIndex[hostId] = r.MatchIndex + 1
-								}
+									// Update nextIndex and matchIndex
+									if r.MatchIndex > rn.matchIndex[hostId]{
+										rn.matchIndex[hostId] = r.MatchIndex
+										rn.nextIndex[hostId] = r.MatchIndex + 1
+									}
 
-								// Consistency check
-								// rn.log[r.MatchIndex].Term == r.Term ??
-								if r.MatchIndex > rn.commitIndex && rn.log[r.MatchIndex].Term == rn.currentTerm && r.MatchIndex <= int32(len(rn.log)){
-									//Count how many nodes have committed the log. If majority, leader commit the log
-									commitCount := 0
-									for _, matchIndex := range rn.matchIndex{
-										if matchIndex >= r.MatchIndex{
-											commitCount++
+									// Consistency check
+									// rn.log[r.MatchIndex].Term == r.Term ??
+									if r.MatchIndex > rn.commitIndex && rn.log[r.MatchIndex].Term == rn.currentTerm && r.MatchIndex <= int32(len(rn.log)){
+										//Count how many nodes have committed the log. If majority, leader commit the log
+										commitCount := 0
+										for _, matchIndex := range rn.matchIndex{
+											if matchIndex >= r.MatchIndex{
+												commitCount++
+											}
+										}
+										if commitCount >= len(hostConnectionMap)/2{
+											rn.commitIndex = r.MatchIndex
+											log.Println("Leader commit log")
+											rn.commitChan <- true
 										}
 									}
-									if commitCount >= len(hostConnectionMap)/2{
-										rn.commitIndex = r.MatchIndex
-										log.Println("Leader commit log")
-										rn.commitChan <- true
+									
+								}else if err == nil && !r.Success && r.Term > rn.currentTerm{ // other node term > leader term
+									rn.serverState = raft.Role_Follower
+									rn.currentTerm = r.Term
+									rn.votedFor = -1
+									rn.currentLeader = -1
+									log.Println("Leader change to follower, outdated leader")
+									rn.finishChan <- true
+								}else if err == nil && !r.Success && r.Term <= rn.currentTerm{
+									// If the follower's log is outdated, decrement the nextIndex, appendEntries again
+									if rn.nextIndex[hostId] >= 1{
+										rn.nextIndex[hostId] = rn.nextIndex[hostId] - 1
 									}
+									log.Println("Leader appendEntries again, outdated log")
+								}else{
+									//error handling
+									log.Println("Error in AppendEntries")
 								}
-								
-							}else if err == nil && !r.Success && r.Term > rn.currentTerm{ // other node term > leader term
-								rn.serverState = raft.Role_Follower
-								rn.currentTerm = r.Term
-								rn.votedFor = -1
-								rn.currentLeader = -1
-								log.Println("Leader change to follower, outdated leader")
-								rn.finishChan <- true
-							}else if err == nil && !r.Success && r.Term <= rn.currentTerm{
-								// If the follower's log is outdated, decrement the nextIndex, appendEntries again
-								if rn.nextIndex[hostId] >= 1{
-									rn.nextIndex[hostId] = rn.nextIndex[hostId] - 1
-								}
-								log.Println("Leader appendEntries again, outdated log")
-							}else{
-								//error handling
-								log.Println("Error in AppendEntries")
-							}
-							rn.mu.Unlock()
-						}(hostId, client)
+								rn.mu.Unlock()
+							}(hostId, client)
+						}
 					}
 					
 					select{
