@@ -487,18 +487,19 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 	if ret.Status == raft.Status_OK || ret.Status == raft.Status_KeyNotFound{
 		if rn.log == nil{
 			rn.log = []*raft.LogEntry{}
-			
 		}
 		rn.log = append(rn.log, &raft.LogEntry{Term: rn.currentTerm, Op: args.Op, Key: args.Key, Value: args.V})
 		// Wait until majority of nodes have committed the log
-		log.Println("node", rn.id, "wait for commit")
+		log.Println("node", rn.id, "wait for commit, rn.log:",rn.log)
 		<- rn.commitChan
 
 		// Update kvMap
 		rn.mu.Lock()
 		if args.Op == raft.Operation_Put{
+			log.Println("node", rn.id, "put key-value pair")
 			rn.kvMap[args.Key] = args.V
 		}else if args.Op == raft.Operation_Delete{
+			log.Println("node", rn.id, "delete key-value pair")
 			delete(rn.kvMap, args.Key)
 		}
 		rn.commitIndex++
@@ -576,7 +577,6 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 	}else{
 		reply.VoteGranted = false
 	}
-	log.Println("node ", args.From, " <- ", rn.id, " - RequestVote &reply:", &reply)
 	return &reply, nil
 }
 //TODO: ensure all nodes success?
@@ -620,15 +620,15 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 
 	if args.Term < rn.currentTerm{ 
 		// leader is outdated
-		log.Println("node ", rn.id, " - AppendEntries: leader is outdated")
+		log.Println("node ", rn.id, "- AppendEntries: leader is outdated")
 		reply.Success = false
 	}else if args.PrevLogIndex > 0 && int32(len(rn.log)) < args.PrevLogIndex{ 
 		// receiver node do not have matching PrevLog Index
-		log.Println("node ", rn.id, " - AppendEntries: No matching PrevLog Index")
+		log.Println("node ", rn.id, "- AppendEntries: No matching PrevLog Index")
 		reply.Success = false
 	}else if args.PrevLogIndex > 0 && rn.log[args.PrevLogIndex].Term != args.PrevLogTerm{ 
 		// receiver node PrevLog Term is not matching
-		log.Println("node ", rn.id, " - AppendEntries: No matching PrevLog Term")
+		log.Println("node ", rn.id, "- AppendEntries: No matching PrevLog Term")
 		reply.Success = false
 	}
 
@@ -646,12 +646,17 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 				break
 			}
 		}
-		
+		log.Println("node ", rn.id, "- AppendEntries deleted conflict logs, rn.log:", rn.log)
+
 		// 2. Append new entries not in the log (append leader log to follower)
 		if args.Entries != nil{
+			if rn.log == nil{
+				rn.log = []*raft.LogEntry{}
+			}
 			rn.log = append(rn.log, args.Entries...)
 		}
 		reply.MatchIndex = int32(len(rn.log))
+		log.Println("node ", rn.id, "- AppendEntries appended logs, rn.log:", rn.log, "MatchIndex:", reply.MatchIndex)
 	}else if reply.Success && args.Entries == nil{
 		// Heartbeat
 		reply.MatchIndex = int32(args.PrevLogIndex)
@@ -660,7 +665,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 
 	// Apply when committed
 	if args.LeaderCommit > rn.commitIndex{
-		log.Println("node ", rn.id, " - AppendEntries: Entered Commit Phase")
+		log.Println("node ", rn.id, "- AppendEntries: Entered Commit Phase")
 		// minIndex = min(follower lastLogIndex, leader CommitIndex)
 		minIndex := int32(len(rn.log))
 		if args.LeaderCommit < int32(len(rn.log)){
@@ -675,9 +680,8 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 			}
 		}
 		rn.commitIndex = minIndex
+		log.Println("node ", rn.id, "- AppendEntries committed, rn.commitIndex:", rn.commitIndex)
 	}
-	
-	log.Println("node", reply.From, "->", reply.To,"AppendEntries: Done, &reply:", &reply)
 	return &reply, nil
 }
 
