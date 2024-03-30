@@ -189,10 +189,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 
 
 				case raft.Role_Candidate:
-					rn.mu.Lock()
 					rn.currentTerm++
 					rn.votedFor = int32(rn.id)
-					rn.mu.Unlock()
 					var lastLogIndex int32 = 0
 					var lastLogTerm int32 = 0
 					if len(rn.log) > 0{
@@ -234,20 +232,16 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								// hostConnectionMap is all the other nodes, except itself
 								// The node votes for itself, so half of hostConnectionMap voteNum == len(hostConnectionMap)/2 means majority
 								if voteNum >= len(hostConnectionMap)/2 && rn.serverState == raft.Role_Candidate{
-									rn.mu.Lock()
 									rn.serverState = raft.Role_Leader
 									log.Println("Change candidate state to leader")
 									rn.finishChan <- true //Leave the Candidate state, Back to the begainning of the outer for loop
-									rn.mu.Unlock()
 								}
 							}else if err == nil && r.Term > rn.currentTerm{ // other node term term > candidate term
-								rn.mu.Lock()
 								rn.serverState = raft.Role_Follower
 								rn.currentTerm = r.Term
 								rn.votedFor = -1
 								rn.currentLeader = -1
 								rn.finishChan <- true
-								rn.mu.Unlock()
 								log.Println("Candidate change to follower, outdated leader")
 							}
 						}(hostId, client)
@@ -297,8 +291,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								interval = rn.heartBeatInterval
 							}
 
-							commitCount := 0
-
 							// Send out heartbeat to all followers
 							for hostId, client := range hostConnectionMap{
 
@@ -333,6 +325,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										LeaderCommit: leaderCommit,
 									})
 
+									rn.mu.Lock()
 									if err != nil{
 										log.Println("Leader ", rn.id," receive AppendEntries error from ", hostId)
 										log.Println(err)
@@ -343,45 +336,48 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									//log.Println("AppendEntries ?")
 									if err == nil && r.Success { // all followers are up to date
 										log.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
-										// bug: error after this line
 
-										//Update nextIndex and matchIndex of follower (or do in AppendEntries)
-										//rn.nextIndex[hostId] = r.MatchIndex + 1
+										// Update nextIndex and matchIndex
+										if r.MatchIndex > rn.matchIndex[hostId]{
+											rn.matchIndex[hostId] = r.MatchIndex
+											rn.nextIndex[hostId] = r.MatchIndex + 1
+										}
 
-										//TODO: matchIndex[N]
-
-										//Count how many nodes have committed the log
-										//If majority committed, considered as committed, commit log in leader
-										//If a node committed the log, send a signal to the commitChan
-										rn.mu.Lock()
-										//if rn.matchIndex(hostId) 
-										commitCount++
-										rn.mu.Unlock()
-										if commitCount > len(hostConnectionMap)/2{
-											rn.commitIndex = rn.commitIndex + int32(len(sendLog))
-											log.Println("Leader commit log")
-											rn.commitChan <- true
+										// Consistency check
+										// rn.log[r.MatchIndex].Term == r.Term ??
+										if r.MatchIndex > rn.commitIndex && rn.log[r.MatchIndex].Term == rn.currentTerm && r.MatchIndex <= int32(len(rn.log)){
+											//Count how many nodes have committed the log. If majority, leader commit the log
+											commitCount := 0
+											for _, matchIndex := range rn.matchIndex{
+												if matchIndex >= r.MatchIndex{
+													commitCount++
+												}
+											}
+											if commitCount >= len(hostConnectionMap)/2{
+												rn.commitIndex = r.MatchIndex
+												log.Println("Leader commit log")
+												rn.commitChan <- true
+										}
 										}
 										
 									}else if err == nil && !r.Success && r.Term > rn.currentTerm{ // other node term > leader term
-										rn.mu.Lock()
 										rn.serverState = raft.Role_Follower
 										rn.currentTerm = r.Term
 										rn.votedFor = -1
 										rn.currentLeader = -1
 										log.Println("Leader change to follower, outdated leader")
 										rn.finishChan <- true
-										rn.mu.Unlock()
 									}else if err == nil && !r.Success && r.Term <= rn.currentTerm{
 										// If the follower's log is outdated, decrement the nextIndex, appendEntries again
-										rn.mu.Lock()
-										rn.nextIndex[hostId] = rn.nextIndex[hostId] - 1
-										rn.mu.Unlock()
+										if rn.nextIndex[hostId] >= 1{
+											rn.nextIndex[hostId] = rn.nextIndex[hostId] - 1
+										}
 										log.Println("Leader appendEntries again, outdated log")
 									}else{
 										//error handling
 										log.Println("Error in AppendEntries")
 									}
+									rn.mu.Unlock()
 								}(hostId, client)
 							}
 						case <- rn.resetChan:
@@ -392,7 +388,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 							log.Println("Leader commit log")
 
 						case <- rn.finishChan:
-							log.Println("Leader finished the election, outdated leader")
+							log.Println("Leader done, outdated leader")
 						
 						//TODO: appendEntries reset heartBeatInterval here 
 					}
@@ -427,13 +423,11 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 		if args.Op == raft.Operation_Delete{
 			// Check if the key exists
 			// If existed, set ok to true, otherwise false
-			rn.mu.Lock()
 			if _, ok := rn.kvMap[args.Key]; ok{
 				ret.Status = raft.Status_OK
 			}else{
 				ret.Status = raft.Status_KeyNotFound
 			}
-			rn.mu.Unlock()
 		}else{ // Put a new key-value pair
 			ret.Status = raft.Status_OK
 		}
@@ -443,9 +437,7 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 	}
 
 	if ret.Status == raft.Status_OK || ret.Status == raft.Status_KeyNotFound{
-		rn.mu.Lock()
 		rn.log = append(rn.log, &raft.LogEntry{Term: rn.currentTerm, Op: args.Op, Key: args.Key, Value: args.V})
-		rn.mu.Unlock()
 		// Wait until majority of nodes have committed the log
 		<- rn.commitChan
 
@@ -500,8 +492,6 @@ func (rn *raftNode) GetValue(ctx context.Context, args *raft.GetValueArgs) (*raf
 // Leader Election
 func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs) (*raft.RequestVoteReply, error) {
 	// TODO: Implement this!
-	rn.mu.Lock()
-	defer rn.mu.Unlock()
 	var reply raft.RequestVoteReply
 	reply.From = args.To
 	reply.To = args.From
@@ -592,23 +582,16 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 	}
 
 	// Handle if it is successful
-	if reply.Success == true && args.Entries != nil{
-		// conflictIndex := Min(int32(len(rn.log)), args.PrevLogIndex + 1)
-		// conflictTerm := rn.log[conflictIndex].Term
-
+	if reply.Success && args.Entries != nil{
 		// 1. Delete the conflict log entries (if not same log, delete from follower)
-		//if args.PrevLogIndex >= 
-
-		log.Println("node ", rn.id, " - AppendEntries: Entered Log Edit Phase")
 		var i int32 = 1
-		// Handle if rn logIndex > leader logIndex
 		for i = 1; args.PrevLogIndex + i <= int32(len(rn.log)) && i <= int32(len(args.Entries)); i++{
 			if args.PrevLogIndex + i >= int32(len(rn.log)) || rn.log == nil{
 				break
 			} 
 			// existing log conflicts with new one
 			if rn.log[args.PrevLogIndex + i].Term != args.Entries[i].Term{
-				rn.log = rn.log[:args.PrevLogIndex + i]
+				rn.log = rn.log[:args.PrevLogIndex + i]  // delete the conflict log
 				break
 			}
 		}
@@ -621,7 +604,6 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 	}else if reply.Success && args.Entries == nil{
 		// Heartbeat
 		reply.MatchIndex = args.PrevLogIndex
-		//log.Println("node ", rn.id, " - AppendEntries: Entered HeartBeat Phase")
 	}
 	//log.Println("AppendEntries update log done, MatchIndex:", reply.MatchIndex)
 
