@@ -274,13 +274,16 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 						rn.matchIndex[i] = 0
 					}
 					initial := true
+
+
+					//TODO: update hardcode
 					// First heartbeat
 					if initial{
 						initial = false
 						for hostId, client := range hostConnectionMap{
 							var prevLogIndex int32 = rn.nextIndex[hostId] - 1
 							var prevLogTerm int32 = 0
-							if prevLogIndex > 0{ // If the log is not empty
+							if prevLogIndex > 0 && len(rn.log) > 0{ // If the log is not empty
 								prevLogTerm = rn.log[prevLogIndex].Term
 							}
 
@@ -351,8 +354,9 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 
 								// Get prevLogIndex and prevLogTerm
 								var prevLogIndex int32 = rn.nextIndex[hostId] - 1
+								log.Println("hostId",hostId,"- prevLogIndex: ", prevLogIndex, "len(rn.log): ", len(rn.log))
 								var prevLogTerm int32 = 0
-								if prevLogIndex > 0{ // If the log is not empty
+								if prevLogIndex > 0 && len(rn.log) > 0{ // If the log is not empty
 									prevLogTerm = rn.log[prevLogIndex].Term
 								}
 								
@@ -362,6 +366,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									sendLog = rn.log[prevLogIndex:]
 								}
 								leaderCommit := rn.commitIndex
+								log.Println("hostId",hostId,"- sendLog: ", sendLog, "leaderCommit: ", leaderCommit)
 
 								go func(hostId int32, client raft.RaftNodeClient){
 									// 100 ms timeout for follower communication
@@ -632,12 +637,14 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		reply.Success = false
 	}
 
+	log.Println("node ", rn.id, "- AppendEntries: before log handle")
 	// Handle if it is successful
 	if reply.Success && args.Entries != nil{
 		// 1. Delete the conflict log entries (if not same log, delete from follower)
 		var i int32 = 1
 		for i = 1; args.PrevLogIndex + i <= int32(len(rn.log)) && i <= int32(len(args.Entries)); i++{
-			if args.PrevLogIndex + i >= int32(len(rn.log)) || rn.log == nil{
+			log.Println("node ", rn.id, "- AppendEntries delete conflict logs, i:", i, "args.PrevLogIndex + i:", args.PrevLogIndex + i, "len(rn.log):", len(rn.log))
+			if rn.log == nil || args.PrevLogIndex + i >= int32(len(rn.log)){
 				break
 			} 
 			// existing log conflicts with new one
