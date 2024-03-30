@@ -174,12 +174,10 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					select {
 						// Set timer to electionTimeout. If timeout, change to candidate
 						case <- time.After(time.Duration(rn.electionTimeout) * time.Millisecond):
-							log.Println("node ", rn.id, " - timout:", rn.electionTimeout)
 							rn.serverState = raft.Role_Candidate
 							log.Println("Change follower state to candidate, id: ", rn.id)
 						
 						case <- rn.heartbeatChan:
-							//log.Println("node ", rn.id, " - Follower receive heartbeat timeout")
 							// Reset when received heartbeat from leader
 						
 						case <- rn.resetChan:
@@ -297,11 +295,9 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									LeaderId: int32(rn.id),
 									PrevLogIndex: prevLogIndex,
 									PrevLogTerm: prevLogTerm,
-									Entries: nil,
+									Entries: []*raft.LogEntry{},
 									LeaderCommit: rn.commitIndex,
 								})
-
-								rn.mu.Lock()
 
 								if err == nil && r.Success { // all followers are up to date
 									log.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
@@ -313,7 +309,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									}
 
 									// Consistency check
-									// rn.log[r.MatchIndex].Term == r.Term ??
 									if r.MatchIndex > rn.commitIndex && rn.log[r.MatchIndex].Term == rn.currentTerm && r.MatchIndex <= int32(len(rn.log)){
 										//Count how many nodes have committed the log. If majority, leader commit the log
 										commitCount := 0
@@ -346,7 +341,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									//error handling
 									log.Println("Error in AppendEntries")
 								}
-								rn.mu.Unlock()
 							}(hostId, client)
 						}
 					}
@@ -386,9 +380,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										LeaderCommit: leaderCommit,
 									})
 
-									rn.mu.Lock()
-									
-									//log.Println("AppendEntries ?")
 									if err == nil && r.Success { // all followers are up to date
 										log.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
 
@@ -399,7 +390,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										}
 
 										// Consistency check
-										// rn.log[r.MatchIndex].Term == r.Term ??
 										if r.MatchIndex > rn.commitIndex && rn.log[r.MatchIndex].Term == rn.currentTerm && r.MatchIndex <= int32(len(rn.log)){
 											//Count how many nodes have committed the log. If majority, leader commit the log
 											commitCount := 0
@@ -432,7 +422,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										//error handling
 										log.Println("Error in AppendEntries")
 									}
-									rn.mu.Unlock()
 								}(hostId, client)
 							}
 						case <- rn.resetChan:
@@ -470,7 +459,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 // Log replication, client update kvMap
 func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.ProposeReply, error) {
 	// TODO: Implement this!
-	log.Printf("Receive propose from client")
+	log.Println("node", rn.id, "receive propose from client")
 	var ret raft.ProposeReply
 
 	if rn.serverState == raft.Role_Leader{
@@ -479,21 +468,30 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 			// Check if the key exists
 			// If existed, set ok to true, otherwise false
 			if _, ok := rn.kvMap[args.Key]; ok{
+				log.Println("node", rn.id, "ok to delete")
 				ret.Status = raft.Status_OK
 			}else{
+				log.Println("node", rn.id, "key not found to delete")
 				ret.Status = raft.Status_KeyNotFound
 			}
 		}else{ // Put a new key-value pair
+			log.Println("node", rn.id, "ok to put")
 			ret.Status = raft.Status_OK
 		}
 	}else{  // Proposing to wrong node, not a leader
+		log.Println("node", rn.id, "Got Proposed to wrong node")
 		ret.CurrentLeader = rn.votedFor
 		ret.Status = raft.Status_WrongNode
 	}
 
 	if ret.Status == raft.Status_OK || ret.Status == raft.Status_KeyNotFound{
+		if rn.log == nil{
+			rn.log = []*raft.LogEntry{}
+			
+		}
 		rn.log = append(rn.log, &raft.LogEntry{Term: rn.currentTerm, Op: args.Op, Key: args.Key, Value: args.V})
 		// Wait until majority of nodes have committed the log
+		log.Println("node", rn.id, "wait for commit")
 		<- rn.commitChan
 
 		// Update kvMap
