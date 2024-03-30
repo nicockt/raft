@@ -495,7 +495,6 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 	var reply raft.RequestVoteReply
 	reply.From = args.To
 	reply.To = args.From
-	log.Println("node ", args.To, " <- ", args.From, " - RequestVote: Entered Voting Phase")
 
 	// If the candidate's term is less than the current term, reject the vote
 	// If the candidate's term is greater than the current term, vote for the candidate
@@ -522,10 +521,9 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 		reply.VoteGranted = true
 		rn.resetChan <- true
 	}else{
-		log.Println("node ", args.From, " <- ", rn.id, " - RequestVote: vote not granted")
 		reply.VoteGranted = false
 	}
-	
+	log.Println("node ", args.From, " <- ", rn.id, " - RequestVote &reply:", &reply)
 	return &reply, nil
 }
 //TODO: ensure all nodes success?
@@ -541,8 +539,8 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
 	var reply raft.AppendEntriesReply
-	reply.From = args.To
-	reply.To = args.From
+	reply.From = int32(args.To)
+	reply.To = int32(args.From)
 	reply.Success = true
 	reply.MatchIndex = int32(0) // default value
 
@@ -565,7 +563,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		}
 	}
 
-	reply.Term = rn.currentTerm
+	reply.Term = int32(rn.currentTerm)
 
 	if args.Term < rn.currentTerm{ 
 		// leader is outdated
@@ -603,7 +601,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		reply.MatchIndex = int32(len(rn.log))
 	}else if reply.Success && args.Entries == nil{
 		// Heartbeat
-		reply.MatchIndex = args.PrevLogIndex
+		reply.MatchIndex = int32(args.PrevLogIndex)
 	}
 	//log.Println("AppendEntries update log done, MatchIndex:", reply.MatchIndex)
 
@@ -626,7 +624,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		rn.commitIndex = minIndex
 	}
 	
-	log.Println("node ", rn.id, " - AppendEntries: Done, success: ", reply.Success, " MatchIndex: ", reply.MatchIndex)
+	log.Println("node", reply.From, "->", reply.To,"AppendEntries: Done, &reply:", &reply)
 	return &reply, nil
 }
 
