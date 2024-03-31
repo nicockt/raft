@@ -264,9 +264,11 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 
 						initial = false
 						for hostId, client := range hostConnectionMap{
-							var prevLogIndex int32 = rn.matchIndex[hostId]
+							
+							// Get prevLogIndex and prevLogTerm
+							var prevLogIndex int32 = rn.matchIndex[hostId] // prevLogIndex starts from 0 if log is empty
 							var prevLogTerm int32 = 0
-							if prevLogIndex > 0 && len(rn.log) > 1{ // If the log is not empty
+							if prevLogIndex >= 1 && len(rn.log) >= 2{ // If the log is not empty
 								prevLogTerm = rn.log[prevLogIndex].Term
 							}
 
@@ -292,19 +294,22 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									}
 
 									// Consistency check
-									if r.MatchIndex > rn.commitIndex && rn.log[r.MatchIndex].Term == rn.currentTerm && r.MatchIndex <= int32(len(rn.log)){
-										//Count how many nodes have committed the log. If majority, leader commit the log
-										commitCount := 0
-										for _, matchIndex := range rn.matchIndex{
-											if matchIndex >= r.MatchIndex{
-												commitCount++
+										// Check all logs from rn.commitIndex + 1 to r.MatchIndex
+										for i:= rn.commitIndex + 1; i <= r.MatchIndex; i++{
+											if rn.log[r.MatchIndex].Term == rn.currentTerm && r.MatchIndex < int32(len(rn.log)){
+												//Count how many nodes have committed the log. If majority, leader commit the log
+												commitCount := 0
+												for _, matchIndex := range rn.matchIndex{
+													if matchIndex >= i{
+														commitCount++
+													}
+												}
+												if commitCount >= len(hostConnectionMap)/2{
+													// Commit the log, pass back to Propose function
+													rn.commitChan <- true
+												}
 											}
 										}
-										if commitCount >= len(hostConnectionMap)/2{
-											rn.commitIndex = r.MatchIndex
-											rn.commitChan <- true
-										}
-									}
 									
 								}else if err == nil && !r.Success && r.Term > rn.currentTerm{ // other node term > leader term
 									rn.serverState = raft.Role_Follower
