@@ -272,7 +272,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 
 					//TODO: update hardcode
 					// First heartbeat
-					log.Println("Leader ", rn.id, " send heartbeat, initial:", initial)
 					if initial{
 						initial = false
 						for hostId, client := range hostConnectionMap{
@@ -285,7 +284,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 							go func(hostId int32, client raft.RaftNodeClient){
 								ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
 								defer cancel()
-								log.Println("Leader ", rn.id," send AppendEntries to ", hostId)
 								r, err := client.AppendEntries(ctx, &raft.AppendEntriesArgs{
 									From: int32(rn.id),
 									To: int32(hostId),
@@ -364,8 +362,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									// 100 ms timeout for follower communication
 									ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
 									defer cancel()
-									log.Println("Leader ", rn.id," send AppendEntries to ", hostId, "- prevLogIndex: ", prevLogIndex, "prevLogTerm: ", prevLogTerm, "leaderCommit:", rn.commitIndex,"rn.nextIndex[hostId]: ", rn.nextIndex[hostId], "sendLog:", sendLog)
-
+									
 									// variable r to receive the result of the AppendEntries GRPC
 									r, err := client.AppendEntries(ctx, &raft.AppendEntriesArgs{
 										From: int32(rn.id),
@@ -402,7 +399,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 											}
 											if commitCount >= len(hostConnectionMap)/2{
 												log.Println("Leader commit log, r.MatchIndex:", r.MatchIndex, "rn.commitIndex:", rn.commitIndex, "len(rn.log):", len(rn.log), "commitCount:", commitCount)
-												rn.commitIndex = int32(r.MatchIndex)
 												rn.commitChan <- true
 										}
 										}
@@ -499,7 +495,7 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 			log.Println("node", rn.id, "delete key-value pair")
 			delete(rn.kvMap, args.Key)
 		}
-		//rn.commitIndex++
+		rn.commitIndex++
 		rn.mu.Unlock()
 	}
 
@@ -627,7 +623,6 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		reply.Success = false
 	}
 
-	log.Println("node ", rn.id, "- AppendEntries: before log handle")
 	// Handle if it is successful
 	if reply.Success && args.Entries != nil{
 		// 1. Delete the conflict log entries (if not same log, delete from follower)
