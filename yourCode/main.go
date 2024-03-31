@@ -164,6 +164,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 	// Run concurrent goroutine
 	go func(){
 		//infinite loop to check the state of the node
+		initial := true
 		for{
 			switch rn.serverState{
 				case raft.Role_Follower:
@@ -204,7 +205,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 							ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
 							defer cancel()
 							// variable r to receive the result of the RequestVote GRPC
-							log.Println("Node ", rn.id, " send RequestVote to ", hostId)
 							r, err:= client.RequestVote(ctx, &raft.RequestVoteArgs{
 								From: int32(rn.id),
 								To: int32(hostId),
@@ -213,10 +213,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								LastLogIndex: lastLogIndex,  
 								LastLogTerm: lastLogTerm, 
 							})
-							if err != nil{
-								log.Println("Node ", rn.id, " receive RequestVote error from ", hostId)
-								log.Println("errorm msg: ", err)
-							}
 
 							if err == nil && r.VoteGranted && r.Term == rn.currentTerm{ 
 								// Race condition: multiple goroutines may update the voteNum at the same time
@@ -224,7 +220,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								voteNum++
 								rn.mu.Unlock() //unlock
 
-								log.Println("Node ", r.From, " vote for node ", rn.id, " voteNum: ", voteNum, "Needed vote: ", len(hostConnectionMap)/2)
 								// If majority, change to leader
 								// hostConnectionMap is all the other nodes, except itself
 								// The node votes for itself, so half of hostConnectionMap voteNum == len(hostConnectionMap)/2 means majority
@@ -239,7 +234,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 								rn.votedFor = -1
 								rn.currentLeader = -1
 								rn.finishChan <- true
-								log.Println("Candidate change to follower, outdated leader")
+								log.Println("Candidate node",rn.id,"change to follower, outdated leader")
 							}
 						}(hostId, client)
 					}
@@ -273,11 +268,11 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 						rn.nextIndex[i] = int32(len(rn.log)) // nextIndex starts from 1 (if log is empty)
 						rn.matchIndex[i] = 0
 					}
-					initial := true
 
 
 					//TODO: update hardcode
 					// First heartbeat
+					log.Println("Leader ", rn.id, " send heartbeat, initial:", initial)
 					if initial{
 						initial = false
 						for hostId, client := range hostConnectionMap{
@@ -370,8 +365,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									// 100 ms timeout for follower communication
 									ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
 									defer cancel()
-									log.Println("Leader ", rn.id," send AppendEntries to ", hostId)
-									log.Println("node",hostId,"- prevLogIndex: ", prevLogIndex, "prevLogTerm: ", prevLogTerm, "rn.nextIndex[hostId]: ", rn.nextIndex[hostId])
+									log.Println("Leader ", rn.id," send AppendEntries to ", hostId, "- prevLogIndex: ", prevLogIndex, "prevLogTerm: ", prevLogTerm, "rn.nextIndex[hostId]: ", rn.nextIndex[hostId], "sendLog:", sendLog)
 
 									// variable r to receive the result of the AppendEntries GRPC
 									r, err := client.AppendEntries(ctx, &raft.AppendEntriesArgs{
