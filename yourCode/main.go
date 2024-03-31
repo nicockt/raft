@@ -190,8 +190,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					rn.votedFor = int32(rn.id)
 					var lastLogIndex int32 = 0
 					var lastLogTerm int32 = 0
-					if len(rn.log) > 0{
-						lastLogIndex = int32(len(rn.log))
+					if len(rn.log) > 1{
+						lastLogIndex = int32(len(rn.log) - 1) // lastLogIndex starts from 1 (if log is not empty)
 						lastLogTerm = rn.log[lastLogIndex].Term
 					}
 					voteNum := 0
@@ -557,8 +557,8 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 	// If the candidate's term is greater than the current term, vote for the candidate
 	var lastLogIndex int32 = 0
 	var lastLogTerm int32 = 0
-	if len(rn.log) > 0{
-		lastLogIndex = int32(len(rn.log))
+	if len(rn.log) > 1{
+		lastLogIndex = int32(len(rn.log) - 1) // lastLogIndex starts from 1 (if log is not empty)
 		lastLogTerm = rn.log[lastLogIndex].Term
 	}
 
