@@ -98,7 +98,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 	hostConnectionMap := make(map[int32]raft.RaftNodeClient)
 
 	rn := raftNode{
-		log: nil,
+		log: []*raft.LogEntry{nil},	// log starts from 1
 
 		id: int32(nodeId),		
 		electionTimeout: int32(electionTimeout),
@@ -490,14 +490,12 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 	}
 
 	if ret.Status == raft.Status_OK || ret.Status == raft.Status_KeyNotFound{
-		if rn.log == nil{
-			rn.log = []*raft.LogEntry{}
-		}
 		rn.log = append(rn.log, &raft.LogEntry{Term: rn.currentTerm, Op: args.Op, Key: args.Key, Value: args.V})
-		// Wait until majority of nodes have committed the log
+		// Wait until majority of nodes have committed the log	
 		log.Println("node", rn.id, "wait for commit, rn.log:",rn.log)
 		<- rn.commitChan
 
+		log.Println("node", rn.id, "commit done")
 		// Update kvMap
 		rn.mu.Lock()
 		if args.Op == raft.Operation_Put{
