@@ -260,19 +260,20 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 					// Replicate Log: Send out appendEntires GRPC to all followers
 					// Send different log entry to different followers according to commitIndex & mathcIndex
 					
-					// Initialize the nextIndex and matchIndex with default values
-					rn.matchIndex = make([]int32, len(hostConnectionMap) + 1)
-					rn.nextIndex = make([]int32, len(hostConnectionMap) + 1)
-					// Update nextIndex and matchIndex
-					for i := range rn.nextIndex{
-						rn.nextIndex[i] = int32(len(rn.log)) // nextIndex starts from 1 (if log is empty)
-						rn.matchIndex[i] = 0
-					}
 
 
 					//TODO: update hardcode
 					// First heartbeat
 					if initial{
+						// Initialize the nextIndex and matchIndex with default values
+						rn.matchIndex = make([]int32, len(hostConnectionMap) + 1)
+						rn.nextIndex = make([]int32, len(hostConnectionMap) + 1)
+						// Update nextIndex and matchIndex
+						for i := range rn.nextIndex{
+							rn.nextIndex[i] = int32(len(rn.log)) // nextIndex starts from 1 (if log is empty)
+							rn.matchIndex[i] = 0
+						}
+
 						initial = false
 						for hostId, client := range hostConnectionMap{
 							var prevLogIndex int32 = rn.matchIndex[hostId]
@@ -362,7 +363,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									// 100 ms timeout for follower communication
 									ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
 									defer cancel()
-									
+
 									// variable r to receive the result of the AppendEntries GRPC
 									r, err := client.AppendEntries(ctx, &raft.AppendEntriesArgs{
 										From: int32(rn.id),
@@ -374,9 +375,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										Entries: sendLog,
 										LeaderCommit: rn.commitIndex,
 									})
-									if err != nil{
-										log.Println("Leader ", rn.id, " receive AppendEntries error from ", hostId)
-									}
 
 									if err == nil && r.Success { // all followers are up to date
 										log.Println("AppendEntries done, from:", r.From, " Success", " Term:", r.Term, " Matchedindex:", r.MatchIndex)
@@ -386,21 +384,26 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 											rn.matchIndex[hostId] = r.MatchIndex
 											rn.nextIndex[hostId] = r.MatchIndex + 1
 										}
-										log.Println("hostId",hostId,"- matchId updated: ", rn.matchIndex[hostId], "rn.nextIndex[hostId]: ", rn.nextIndex[hostId])
+										log.Println("hostId",hostId,"- matchId[2]: ", rn.matchIndex[2], "matchId[3]]: ", rn.matchIndex[3])
+										
 
 										// Consistency check
-										if r.MatchIndex > rn.commitIndex && rn.log[r.MatchIndex].Term == rn.currentTerm && r.MatchIndex < int32(len(rn.log)){
-											//Count how many nodes have committed the log. If majority, leader commit the log
-											commitCount := 0
-											for _, matchIndex := range rn.matchIndex{
-												if matchIndex >= r.MatchIndex{
-													commitCount++
+										// Check all logs from rn.commitIndex + 1 to r.MatchIndex, any to commit?
+										for i:= rn.commitIndex + 1; i <= r.MatchIndex; i++{
+											if rn.log[r.MatchIndex].Term == rn.currentTerm && r.MatchIndex < int32(len(rn.log)){
+												//Count how many nodes have committed the log. If majority, leader commit the log
+												commitCount := 0
+												for _, matchIndex := range rn.matchIndex{
+													log.Println("commit loop check, matchIndex:", matchIndex, "i:", i)
+													if matchIndex >= i{
+														commitCount++
+													}
+												}
+												if commitCount >= len(hostConnectionMap)/2{
+													log.Println("Leader commit log, r.MatchIndex:", i, "rn.commitIndex:", rn.commitIndex, "len(rn.log):", len(rn.log), "commitCount:", commitCount)
+													rn.commitChan <- true
 												}
 											}
-											if commitCount >= len(hostConnectionMap)/2{
-												log.Println("Leader commit log, r.MatchIndex:", r.MatchIndex, "rn.commitIndex:", rn.commitIndex, "len(rn.log):", len(rn.log), "commitCount:", commitCount)
-												rn.commitChan <- true
-										}
 										}
 										
 									}else if err == nil && !r.Success && r.Term > rn.currentTerm{ // other node term > leader term
@@ -459,6 +462,20 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 
 	if rn.serverState == raft.Role_Leader{
 		ret.CurrentLeader = rn.votedFor
+	}else{  // Proposing to wrong node, not a leader
+		log.Println("node", rn.id, "Got Proposed to wrong node")
+		ret.CurrentLeader = rn.votedFor
+		ret.Status = raft.Status_WrongNode
+	}
+
+	if ret.Status != raft.Status_WrongNode{
+		rn.log = append(rn.log, &raft.LogEntry{Term: rn.currentTerm, Op: args.Op, Key: args.Key, Value: args.V})
+		// Wait until majority of nodes have committed the log	
+		log.Println("node", rn.id, "wait for commit, rn.log:",rn.log)
+		<- rn.commitChan
+		log.Println("node", rn.id, "commit done")
+
+		// Check key exists after commit
 		if args.Op == raft.Operation_Delete{
 			// Check if the key exists
 			// If existed, set ok to true, otherwise false
@@ -468,24 +485,13 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 			}else{
 				log.Println("node", rn.id, "key not found to delete")
 				ret.Status = raft.Status_KeyNotFound
+
 			}
 		}else{ // Put a new key-value pair
 			log.Println("node", rn.id, "ok to put")
 			ret.Status = raft.Status_OK
 		}
-	}else{  // Proposing to wrong node, not a leader
-		log.Println("node", rn.id, "Got Proposed to wrong node")
-		ret.CurrentLeader = rn.votedFor
-		ret.Status = raft.Status_WrongNode
-	}
 
-	if ret.Status == raft.Status_OK || ret.Status == raft.Status_KeyNotFound{
-		rn.log = append(rn.log, &raft.LogEntry{Term: rn.currentTerm, Op: args.Op, Key: args.Key, Value: args.V})
-		// Wait until majority of nodes have committed the log	
-		log.Println("node", rn.id, "wait for commit, rn.log:",rn.log)
-		<- rn.commitChan
-
-		log.Println("node", rn.id, "commit done")
 		// Update kvMap
 		rn.mu.Lock()
 		if args.Op == raft.Operation_Put{
@@ -496,6 +502,7 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 			delete(rn.kvMap, args.Key)
 		}
 		rn.commitIndex++
+		log.Println("node", rn.id, " propose done, commitIndex:", rn.commitIndex, "kvMap:", rn.kvMap)
 		rn.mu.Unlock()
 	}
 
@@ -629,7 +636,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		var i int32 = 1
 		var newEntriesMatchCount int32 = 0
 		for i = 1; args.PrevLogIndex + i < int32(len(rn.log)) && i <= int32(len(args.Entries)); i++{
-			log.Println("node ", rn.id, "- AppendEntries delete conflict logs, i:", i, "args.PrevLogIndex + i:", args.PrevLogIndex + i, "len(rn.log):", len(rn.log))
+			//log.Println("node ", rn.id, "- AppendEntries delete conflict logs, i:", i, "args.PrevLogIndex + i:", args.PrevLogIndex + i, "len(rn.log):", len(rn.log))
 
 			// existing log conflicts with new log in sendLog
 			if rn.log[args.PrevLogIndex + i].Term != args.Entries[i-1].Term{
@@ -640,7 +647,7 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 				newEntriesMatchCount++
 			}
 		}
-		log.Println("node ", rn.id, "- AppendEntries deleted conflict logs, rn.log:", rn.log)
+		//log.Println("node ", rn.id, "- AppendEntries deleted conflict logs, rn.log:", rn.log)
 
 		// 2. Append new entries not in the log (append leader log to follower)
 		if newEntriesMatchCount > 0 && int32(len(args.Entries)) > newEntriesMatchCount{
