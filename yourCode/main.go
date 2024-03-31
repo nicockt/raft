@@ -359,13 +359,12 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 									// if the rn.nextIndex has not been updated, send excess log to appendEntries
 									sendLog = rn.log[prevLogIndex+1:]
 								}
-								leaderCommit := rn.commitIndex
 
 								go func(hostId int32, client raft.RaftNodeClient){
 									// 100 ms timeout for follower communication
 									ctx, cancel := context.WithTimeout(context.Background(), 100 * time.Millisecond)
 									defer cancel()
-									log.Println("Leader ", rn.id," send AppendEntries to ", hostId, "- prevLogIndex: ", prevLogIndex, "prevLogTerm: ", prevLogTerm, "rn.nextIndex[hostId]: ", rn.nextIndex[hostId], "sendLog:", sendLog)
+									log.Println("Leader ", rn.id," send AppendEntries to ", hostId, "- prevLogIndex: ", prevLogIndex, "prevLogTerm: ", prevLogTerm, "leaderCommit:", rn.commitIndex,"rn.nextIndex[hostId]: ", rn.nextIndex[hostId], "sendLog:", sendLog)
 
 									// variable r to receive the result of the AppendEntries GRPC
 									r, err := client.AppendEntries(ctx, &raft.AppendEntriesArgs{
@@ -376,7 +375,7 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 										PrevLogIndex: int32(prevLogIndex),
 										PrevLogTerm: prevLogTerm,
 										Entries: sendLog,
-										LeaderCommit: leaderCommit,
+										LeaderCommit: rn.commitIndex,
 									})
 									if err != nil{
 										log.Println("Leader ", rn.id, " receive AppendEntries error from ", hostId)
@@ -402,8 +401,8 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 												}
 											}
 											if commitCount >= len(hostConnectionMap)/2{
-												rn.commitIndex = r.MatchIndex
-												log.Println("Leader commit log")
+												log.Println("Leader commit log, r.MatchIndex:", r.MatchIndex, "rn.commitIndex:", rn.commitIndex, "len(rn.log):", len(rn.log), "commitCount:", commitCount)
+												rn.commitIndex = int32(r.MatchIndex)
 												rn.commitChan <- true
 										}
 										}
@@ -430,9 +429,6 @@ func NewRaftNode(myport int, nodeidPortMap map[int]int, nodeId, heartBeatInterva
 						case <- rn.resetChan:
 							// Go back to the begainning of the for loop
 							log.Println("Leader reset heartBeat interval")
-						
-						case <- rn.commitChan:
-							log.Println("Leader commit log")
 
 						case <- rn.finishChan:
 							log.Println("Leader done, outdated leader")
@@ -503,7 +499,7 @@ func (rn *raftNode) Propose(ctx context.Context, args *raft.ProposeArgs) (*raft.
 			log.Println("node", rn.id, "delete key-value pair")
 			delete(rn.kvMap, args.Key)
 		}
-		rn.commitIndex++
+		//rn.commitIndex++
 		rn.mu.Unlock()
 	}
 
@@ -590,8 +586,6 @@ func (rn *raftNode) RequestVote(ctx context.Context, args *raft.RequestVoteArgs)
 // reply: the AppendEntries Reply Message
 func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesArgs) (*raft.AppendEntriesReply, error) {
 	// TODO: Implement this
-	log.Println("node ", rn.id, "- Enter AppendEntries: Term: ", args.Term, " PrevLogIndex: ", args.PrevLogIndex, " PrevLogTerm: ", args.PrevLogTerm, " Entries: ", args.Entries, " LeaderCommit: ", args.LeaderCommit)
-	
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
 	var reply raft.AppendEntriesReply
@@ -666,7 +660,6 @@ func (rn *raftNode) AppendEntries(ctx context.Context, args *raft.AppendEntriesA
 		// Heartbeat
 		reply.MatchIndex = int32(args.PrevLogIndex)
 	}
-	//log.Println("AppendEntries update log done, MatchIndex:", reply.MatchIndex)
 
 	// Apply when committed
 	if args.LeaderCommit > rn.commitIndex{
